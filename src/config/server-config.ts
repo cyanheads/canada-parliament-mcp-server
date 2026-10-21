@@ -7,7 +7,7 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 /** Default identification sent to public parliamentary sources. */
 export const DEFAULT_USER_AGENT =
-  'canada-parliament-mcp-server/0.1.0 (casey@caseyjhand.com; https://github.com/cyanheads/canada-parliament-mcp-server)';
+  'canada-parliament-mcp-server (casey@caseyjhand.com; https://github.com/cyanheads/canada-parliament-mcp-server)';
 /** Configuration schema; whitespace-only user agents use the default. */
 export const ServerConfigSchema = z.object({
   userAgent: z

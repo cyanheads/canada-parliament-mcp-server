@@ -124,6 +124,31 @@ describe('canparl_search_bills production contract', () => {
       listing(),
     ]);
   });
+  it.each([
+    ['House', 'C-901'],
+    ['Senate', 'S-902'],
+  ])('filters explicit chamber evidence for %s', async (chamber, code) => {
+    feed([
+      rawBill('C-901', {
+        OriginatingChamberNameEn: null,
+        IsHouseBill: true,
+        IsSenateBill: false,
+        OriginatingChamberOrganizationId: 1,
+      }),
+      rawBill('S-902', {
+        OriginatingChamberNameEn: null,
+        IsHouseBill: false,
+        IsSenateBill: true,
+        OriginatingChamberOrganizationId: 2,
+      }),
+    ]);
+    const reply = await call({ session: '45-1', originatingChamber: chamber });
+    check(reply);
+    expect(reply.structuredContent).toMatchObject({
+      total: 1,
+      bills: [{ billCode: code, originatingChamber: chamber }],
+    });
+  });
   it('applies every filter together, aliases values, and computes totals before slicing', async () => {
     feed();
     sponsor([

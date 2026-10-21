@@ -9,15 +9,27 @@ import { createRequestContext } from '@/domain/request-context.js';
 import {
   BilingualTextSchema,
   JsonRecordSchema,
+  OptionalStringSchema,
   SessionInputSchema,
   SourceSchema,
 } from '@/domain/schemas.js';
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
+import type { BillDossier } from '@/services/legisinfo/types.js';
 import { formatResult, renderValue } from './_format.js';
 
 const text = () => z.string().nullable();
 const integer = () => z.number().int().nullable();
 const chamber = () => z.enum(['House', 'Senate']).nullable();
+const sectionNames = [
+  'sponsor',
+  'stages.house',
+  'stages.senate',
+  'stages.royalAssent',
+  'divisions',
+  'senateVoteDetails',
+  'publications',
+  'statute',
+] as const;
 /** Official bill identity and list metadata, without fabricated sponsor fields. */
 export const BillSummarySchema = z
   .object({
@@ -43,153 +55,229 @@ export const BillSummarySchema = z
   .describe('Official bill summary.');
 const StageSchema = z
   .object({
-    id: z.number().int().describe('Official bill stage ID.'),
-    name: BilingualTextSchema.describe('Official stage names.'),
+    id: z.number().int().describe('Bill stage ID.'),
+    name: BilingualTextSchema.describe('Stage names.'),
     chamber: chamber().describe('Containing chamber, or null for royal assent.'),
     state: z
       .object({
-        id: integer().describe('Official stage state ID, or null.'),
-        en: text().describe('English state wording, or null.'),
-        fr: text().describe('French state wording, or null.'),
+        id: integer().describe('Stage state ID.'),
+        en: text().describe('English state wording.'),
+        fr: text().describe('French state wording.'),
       })
       .strict()
-      .describe('Official state including unavailable values.'),
-    stateAsOf: text().describe('Source state-as-of date, or null.'),
+      .describe('Stage state.'),
+    stateAsOf: text().describe('State-as-of date.'),
     committee: z
       .object({
-        id: integer().describe('Committee organization ID, or null.'),
-        acronym: text().describe('Committee acronym, or null.'),
+        id: integer().describe('Committee organization ID.'),
+        acronym: text().describe('Committee acronym.'),
         name: BilingualTextSchema.describe('Committee names.'),
       })
       .strict()
       .nullable()
-      .describe('Committee referral, or null.'),
+      .describe('Committee referral.'),
     sittings: z
       .array(
         z
           .object({
-            number: text().describe('Sitting number, or null.'),
-            date: text().describe('Sitting date, or null.'),
+            number: text().describe('Sitting number.'),
+            date: text().describe('Sitting date.'),
             name: BilingualTextSchema.describe('Sitting names.'),
-            published: z.boolean().nullable().describe('Publication flag, or null.'),
+            published: z.boolean().nullable().describe('Publication flag.'),
           })
           .strict()
-          .describe('Official sitting record.'),
+          .describe('Sitting record.'),
       )
       .nullable()
-      .describe('Actual sittings, empty if none; null if unavailable.'),
+      .describe('Sittings.'),
     committeeMeetings: z
       .array(
         z
           .object({
-            number: text().describe('Committee meeting number, or null.'),
-            date: text().describe('Committee meeting date, or null.'),
-            committeeId: integer().describe('Committee organization ID, or null.'),
-            acronym: text().describe('Committee acronym, or null.'),
+            number: text().describe('Committee meeting number.'),
+            date: text().describe('Committee meeting date.'),
+            committeeId: integer().describe('Committee organization ID.'),
+            acronym: text().describe('Committee acronym.'),
             name: BilingualTextSchema.describe('Committee meeting names.'),
           })
           .strict()
-          .describe('Official committee meeting record.'),
+          .describe('Committee meeting record.'),
       )
       .nullable()
-      .describe('Actual committee meetings, or null if unavailable.'),
-    decisions: z
-      .array(JsonRecordSchema)
-      .nullable()
-      .describe('Complete variable official decisions, or null.'),
+      .describe('Committee meetings.'),
+    decisions: z.array(JsonRecordSchema).nullable().describe('Complete variable decision records.'),
     significantEvents: z
       .array(JsonRecordSchema)
       .nullable()
-      .describe('Complete variable significant events, or null.'),
-    endOfStageEvent: JsonRecordSchema.nullable().describe('Complete end-of-stage event, or null.'),
+      .describe('Complete variable significant-event records.'),
+    endOfStageEvent: JsonRecordSchema.nullable().describe('Complete end-of-stage event.'),
   })
   .strict()
-  .describe('Complete official stage record.');
+  .describe(
+    'Complete official stage; null fields are unavailable and empty arrays have no records.',
+  );
 
 /** Read one official bill dossier without changing unavailable source values. */
 export const getBillTool = tool('canparl_get_bill', {
   description:
-    "Read one House or Senate bill's official dossier, including both chambers' stages, publications, House divisions, and an enacted statute citation when available. Obtain billCode and session from canparl_search_bills; omitted session means the verified current official session.",
+    "Read one House or Senate bill's official dossier. Large dossiers return an outline; re-call with one section and follow pagination.nextOffset for collections. Stages preserve nested records whole. Obtain billCode and session from canparl_search_bills; omitted session means the verified current official session.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     session: SessionInputSchema,
     billCode: z
       .string()
       .describe('Bill code from canparl_search_bills; accepts bill s321, S321, or S-321.'),
+    section: OptionalStringSchema.describe(
+      'One section from the returned outline; omit for full dossier or overflow outline.',
+    ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Zero-based whole-record offset within the selected collection.'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(20)
+      .describe(
+        'Maximum whole records per selected collection page (1–100); byte budget may reduce it.',
+      ),
   }),
   output: z.object({
-    bill: BillSummarySchema.describe('Official bill summary.'),
-    sponsor: z
+    totalCount: z
+      .number()
+      .int()
+      .nullable()
+      .optional()
+      .describe('Selected collection total, or null for unavailable or scalar sections.'),
+    kind: z
+      .enum(['outline', 'section'])
+      .optional()
+      .describe('Absent for full dossier; outline lists sections; section returns one selection.'),
+    sections: z
+      .array(
+        z
+          .object({
+            name: z.string().describe('Exact section selector.'),
+            count: z
+              .number()
+              .int()
+              .nullable()
+              .describe('Collection record count; null for objects or unavailable data.'),
+          })
+          .describe('Retrievable dossier section.'),
+      )
+      .optional()
+      .describe('Available section selectors.'),
+    pagination: z
       .object({
-        name: text().describe('Official sponsor name, or null.'),
-        personId: text().describe(
-          'Official person ID, distinct from an OpenParliament slug; or null.',
-        ),
-        riding: text().describe('Sponsor riding, or null.'),
-      })
-      .strict()
-      .describe('Official sponsor fields.'),
-    stages: z
-      .object({
-        house: z.array(StageSchema).nullable().describe('House stages, or null if unavailable.'),
-        senate: z.array(StageSchema).nullable().describe('Senate stages, or null if unavailable.'),
-        royalAssent: z
-          .array(StageSchema)
+        section: z.string().describe('Selected section.'),
+        offset: z.number().int().describe('Requested zero-based record offset.'),
+        limit: z.number().int().describe('Requested maximum page size.'),
+        total: z
+          .number()
+          .int()
           .nullable()
-          .describe('Royal assent stages, or null if unavailable.'),
+          .describe('Collection total; null for scalar sections or unavailable collections.'),
+        nextOffset: z
+          .number()
+          .int()
+          .nullable()
+          .describe('Next whole-record offset; null when complete.'),
       })
-      .strict()
-      .describe('All official stage containers.'),
-    divisions: z
-      .array(
-        z
-          .object({
-            session: z.string().describe('Verified division session.'),
-            number: z.number().int().describe('House division number for canparl_get_vote.'),
-            subject: BilingualTextSchema.describe('Official division subjects.'),
-            dateTime: text().describe('Official date-time string, or null.'),
-            result: text().describe('Official decision wording, or null.'),
-            yeas: integer().describe('Yea count, or null.'),
-            nays: integer().describe('Nay count, or null.'),
-            paired: integer().describe('Paired count, or null.'),
-            total: integer().describe('Official total, or null.'),
-            url: z.string().describe('Absolute HTTPS House division URL.'),
-          })
-          .strict()
-          .describe('Official House division record.'),
-      )
-      .nullable()
-      .describe('House divisions, or null if unavailable.'),
-    senateVoteDetails: z
-      .array(JsonRecordSchema)
-      .nullable()
-      .describe('Complete variable Senate vote records; not House divisions.'),
-    publications: z
-      .array(
-        z
-          .object({
-            id: z.number().int().describe('Official publication ID.'),
-            typeId: integer().describe('Publication type ID, or null.'),
-            type: BilingualTextSchema.describe('Publication type wording.'),
-            url: z.string().describe('Verified absolute HTTPS document viewer URL.'),
-          })
-          .strict()
-          .describe('Official publication record.'),
-      )
-      .nullable()
-      .describe('Publications, or null if unavailable.'),
-    statute: z
+      .optional()
+      .describe('Whole-record selection continuation.'),
+    disclosure: z
+      .string()
+      .optional()
+      .describe('Overflow, empty, unavailable, or past-end guidance.'),
+    ...z
       .object({
-        year: z.number().int().describe('Statute year.'),
-        chapter: z.string().describe('Exact statute chapter designation.'),
-        citation: z.string().describe('Statutes of Canada citation.'),
+        bill: BillSummarySchema.describe('Official bill summary.'),
+        sponsor: z
+          .object({
+            name: text().describe('Official sponsor name, or null.'),
+            personId: text().describe(
+              'Official person ID, distinct from an OpenParliament slug; or null.',
+            ),
+            riding: text().describe('Sponsor riding, or null.'),
+          })
+          .strict()
+          .describe('Official sponsor fields.'),
+        stages: z
+          .object({
+            house: z
+              .array(StageSchema)
+              .nullable()
+              .describe('House stages, or null if unavailable.'),
+            senate: z
+              .array(StageSchema)
+              .nullable()
+              .describe('Senate stages, or null if unavailable.'),
+            royalAssent: z
+              .array(StageSchema)
+              .nullable()
+              .describe('Royal assent stages, or null if unavailable.'),
+          })
+          .partial()
+          .strict()
+          .describe('All official stage containers.'),
+        divisions: z
+          .array(
+            z
+              .object({
+                session: z.string().describe('Verified division session.'),
+                number: z.number().int().describe('House division number for canparl_get_vote.'),
+                subject: BilingualTextSchema.describe('Official division subjects.'),
+                dateTime: text().describe('Official date-time string, or null.'),
+                result: text().describe('Official decision wording, or null.'),
+                yeas: integer().describe('Yea count, or null.'),
+                nays: integer().describe('Nay count, or null.'),
+                paired: integer().describe('Paired count, or null.'),
+                total: integer().describe('Official total, or null.'),
+                url: z.string().describe('Absolute HTTPS House division URL.'),
+              })
+              .strict()
+              .describe('Official House division record.'),
+          )
+          .nullable()
+          .describe('House divisions, or null if unavailable.'),
+        senateVoteDetails: z
+          .array(JsonRecordSchema)
+          .nullable()
+          .describe('Complete variable Senate vote records; not House divisions.'),
+        publications: z
+          .array(
+            z
+              .object({
+                id: z.number().int().describe('Official publication ID.'),
+                typeId: integer().describe('Publication type ID, or null.'),
+                type: BilingualTextSchema.describe('Publication type wording.'),
+                url: z.string().describe('Verified absolute HTTPS document viewer URL.'),
+              })
+              .strict()
+              .describe('Official publication record.'),
+          )
+          .nullable()
+          .describe('Publications, or null if unavailable.'),
+        statute: z
+          .object({
+            year: z.number().int().describe('Statute year.'),
+            chapter: z.string().describe('Exact statute chapter designation.'),
+            citation: z.string().describe('Statutes of Canada citation.'),
+          })
+          .strict()
+          .nullable()
+          .describe('Enacted statute when both year and chapter exist; otherwise null.'),
+        provenance: z
+          .array(SourceSchema)
+          .describe('Original retrieval metadata for every source request.'),
       })
-      .strict()
-      .nullable()
-      .describe('Enacted statute when both year and chapter exist; otherwise null.'),
-    provenance: z
-      .array(SourceSchema)
-      .describe('Original retrieval metadata for every source request.'),
+      .partial()
+      .required({ bill: true, provenance: true }).shape,
   }),
   enrichment: {
     appliedFilters: z
@@ -203,8 +291,17 @@ export const getBillTool = tool('canparl_get_bill', {
   },
   enrichmentTrailer: {
     appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
+    notice: { render: (value) => renderValue(z.string().parse(value), 'notice') },
   },
   errors: [
+    {
+      reason: 'invalid_bill_section',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Unknown section selector or pagination supplied without a collection section.',
+      recovery:
+        'Choose an available section from the outline and use offset and limit only for collections.',
+      retryable: false,
+    },
     {
       reason: 'unknown_session',
       code: JsonRpcErrorCode.ValidationError,
@@ -247,16 +344,115 @@ export const getBillTool = tool('canparl_get_bill', {
         currentProvenance.push(...current.provenance);
       }
       const result = await service.getBill(session, billCode, request);
-      ctx.enrich({ appliedFilters: { session, billCode } });
-      if (Number(session.split('-')[0]) < 37)
-        ctx.enrich.notice(
-          'This early session provides basic bill coverage; unavailable dossier fields remain null.',
-        );
+      const enrichment = {
+        appliedFilters: { session, billCode },
+        ...(Number(session.split('-')[0]) < 37
+          ? {
+              notice:
+                'This early session provides basic bill coverage; unavailable dossier fields remain null.',
+            }
+          : {}),
+      };
+      ctx.enrich(enrichment);
       request.throwIfOuterAborted();
-      return { ...result.data, provenance: [...currentProvenance, ...result.provenance] };
+      const full = { ...result.data, provenance: [...currentProvenance, ...result.provenance] };
+      const enrichmentContent = {
+        type: 'text',
+        text: `\n\n${Object.entries(enrichment)
+          .map(([key, value]) => renderValue(value, key))
+          .join('\n\n')}`,
+      };
+      const size = (value: unknown) => {
+        const body = JsonRecordSchema.parse(value);
+        return Buffer.byteLength(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'x'.repeat(256),
+            result: {
+              structuredContent: { ...body, ...enrichment },
+              content: [...formatResult(body), enrichmentContent],
+            },
+          }),
+          'utf8',
+        );
+      };
+      const sections = sectionNames.map((name) => {
+        const value = name.startsWith('stages.')
+          ? full.stages[name.slice(7) as keyof BillDossier['stages']]
+          : full[name as Exclude<(typeof sectionNames)[number], `stages.${string}`>];
+        return { name, value };
+      });
+      if (!input.section) {
+        if (input.offset !== 0 || input.limit !== 20) throw ctx.fail('invalid_bill_section');
+        if (size(full) <= 24_000) return full;
+        return {
+          kind: 'outline' as const,
+          bill: full.bill,
+          provenance: full.provenance,
+          sections: sections.map(({ name, value }) => ({
+            name,
+            count: Array.isArray(value) ? value.length : null,
+          })),
+          disclosure:
+            'Dossier exceeds the 24000-byte serialized response budget. Re-call with one section selector; collections use offset and limit. No records have been discarded.',
+        };
+      }
+      const selected = sections.find(({ name }) => name === input.section);
+      if (!selected)
+        throw ctx.fail(
+          'invalid_bill_section',
+          `Unknown section. Available sections: ${sectionNames.join(', ')}.`,
+        );
+      const collection = [
+        'stages.house',
+        'stages.senate',
+        'stages.royalAssent',
+        'divisions',
+        'senateVoteDetails',
+        'publications',
+      ].includes(selected.name);
+      if (!collection && (input.offset !== 0 || input.limit !== 20))
+        throw ctx.fail('invalid_bill_section');
+      const values = Array.isArray(selected.value) ? selected.value : null;
+      const page = (count: number, disclosure?: string) => {
+        const value =
+          values === null ? selected.value : values.slice(input.offset, input.offset + count);
+        return {
+          kind: 'section' as const,
+          totalCount: values?.length ?? null,
+          bill: full.bill,
+          provenance: full.provenance,
+          ...(selected.name.startsWith('stages.')
+            ? { stages: { [selected.name.slice(7)]: value } }
+            : { [selected.name]: value }),
+          pagination: {
+            section: selected.name,
+            offset: input.offset,
+            limit: input.limit,
+            total: values?.length ?? null,
+            nextOffset:
+              values !== null && input.offset + count < values.length ? input.offset + count : null,
+          },
+          ...(disclosure ? { disclosure } : {}),
+        };
+      };
+      let count =
+        values === null ? 0 : Math.max(0, Math.min(input.limit, values.length - input.offset));
+      while (count > 1 && size(page(count)) > 24_000) count--;
+      const disclosure =
+        size(page(count)) > 24_000
+          ? 'One indivisible record or scalar section exceeds the serialized response budget; returned whole without truncation.'
+          : selected.value === null
+            ? 'Section is unavailable in the official source.'
+            : values?.length === 0
+              ? 'Section has no records.'
+              : values !== null && input.offset >= values.length
+                ? 'Offset is past the end of this section.'
+                : undefined;
+      return page(count, disclosure);
     } finally {
       request.dispose();
     }
   },
-  format: (result) => formatResult(result),
+  format: (result) => formatResult(JsonRecordSchema.parse(result)),
 });

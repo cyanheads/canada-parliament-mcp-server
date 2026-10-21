@@ -308,6 +308,50 @@ describe('LegisinfoService network contract', () => {
     expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.Timeout });
     expect(http.calls).toHaveLength(1);
   });
+  it('sheds excess waiters without retrying or dispatching them later', async () => {
+    budget.dispose();
+    const caller = new AbortController();
+    budget = createRequestContext(createMockContext({ signal: caller.signal }));
+    http.route({
+      match: current,
+      respond: (request) =>
+        new Promise<Response>((_resolve, reject) => {
+          request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+            once: true,
+          });
+        }),
+    });
+    const active = service.getCurrentSession(budget).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(250);
+    const second = service.getCurrentSession(budget).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(250);
+    const queued = Array.from({ length: 20 }, () =>
+      service.getCurrentSession(budget).catch((error: unknown) => error),
+    );
+    const rejected: unknown[] = [];
+    const overflow = service.getCurrentSession(budget).catch((error: unknown) => {
+      rejected.push(error);
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'pacer_shed',
+        shedKind: 'queue_full',
+        queueDepth: 20,
+        retryAfter: expect.any(Number),
+      },
+    });
+    expect(http.calls).toHaveLength(2);
+    caller.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    for (const error of await Promise.all([active, second, ...queued]))
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(await overflow).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    expect(http.calls).toHaveLength(2);
+  });
   it('times out a stalled body read within the operation deadline', async () => {
     http.route({
       match: current,

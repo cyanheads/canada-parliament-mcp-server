@@ -50,6 +50,56 @@ describe('OurCommonsService network boundary', () => {
   };
   const sessions = () => http.route({ match: picker, respond: new Response(html) });
 
+  it('bounds cached participant arrays and refetches evicted records', async () => {
+    sessions();
+    http.route({
+      match: (request) => /\/votes\/45\/1\/\d+\/xml$/.test(request.url),
+      respond: (request) =>
+        new Response(xmlParticipants.replaceAll('901', request.url.split('/').at(-2)!)),
+    });
+    const load = async (number: number) => {
+      budget.dispose();
+      budget = createRequestContext(createMockContext());
+      const pending = service.getVoteParticipants('45-1', number, budget);
+      await vi.advanceTimersByTimeAsync(500);
+      return pending;
+    };
+    for (let number = 1; number <= 257; number++) await load(number);
+    const cached = await load(257);
+    expect(cached.provenance.at(-1)?.cached).toBe(true);
+    const refetched = await load(1);
+    expect(refetched.provenance.at(-1)?.cached).toBe(false);
+    expect(http.calls.filter((call) => call.request.url.endsWith('/45/1/1/xml'))).toHaveLength(2);
+  });
+
+  it('cleans expired participant entries before inserting without evicting the live picker', async () => {
+    sessions();
+    http.route(
+      { match: roster, respond: new Response(xmlMembers) },
+      {
+        match: (request) => /\/votes\/45\/1\/\d+\/xml$/.test(request.url),
+        respond: (request) =>
+          new Response(xmlParticipants.replaceAll('901', request.url.split('/').at(-2)!)),
+      },
+    );
+    for (let number = 1; number <= 255; number++) {
+      budget.dispose();
+      budget = createRequestContext(createMockContext());
+      const pending = service.getVoteParticipants('45-1', number, budget);
+      await vi.advanceTimersByTimeAsync(500);
+      await pending;
+    }
+    budget.dispose();
+    await vi.advanceTimersByTimeAsync(300_001);
+    budget = createRequestContext(createMockContext());
+    await settle(service.listMembers(budget));
+    expect((await service.getVoteSessions(budget)).provenance[0]?.cached).toBe(true);
+    expect(http.calls.filter((call) => call.request.url === picker)).toHaveLength(1);
+    expect(
+      (await settle(service.getVoteParticipants('45-1', 1, budget))).provenance.at(-1)?.cached,
+    ).toBe(false);
+  });
+
   it('uses all four fixed canonical routes, complete parsing, headers and manual redirects', async () => {
     sessions();
     http.route(
@@ -273,6 +323,50 @@ describe('OurCommonsService network boundary', () => {
     await vi.advanceTimersByTimeAsync(101);
     expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.Timeout });
     expect(http.calls).toHaveLength(1);
+  });
+  it('sheds excess waiters without retrying or dispatching them later', async () => {
+    budget.dispose();
+    const caller = new AbortController();
+    budget = createRequestContext(createMockContext({ signal: caller.signal }));
+    http.route({
+      match: roster,
+      respond: (request) =>
+        new Promise<Response>((_resolve, reject) => {
+          request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+            once: true,
+          });
+        }),
+    });
+    const active = service.listMembers(budget).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(250);
+    const second = service.listMembers(budget).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(250);
+    const queued = Array.from({ length: 20 }, () =>
+      service.listMembers(budget).catch((error: unknown) => error),
+    );
+    const rejected: unknown[] = [];
+    const overflow = service.listMembers(budget).catch((error: unknown) => {
+      rejected.push(error);
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'pacer_shed',
+        shedKind: 'queue_full',
+        queueDepth: 20,
+        retryAfter: expect.any(Number),
+      },
+    });
+    expect(http.calls).toHaveLength(2);
+    caller.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    for (const error of await Promise.all([active, second, ...queued]))
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(await overflow).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    expect(http.calls).toHaveLength(2);
   });
   it('times out stalled response bodies within the operation deadline', async () => {
     http.route({

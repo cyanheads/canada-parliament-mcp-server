@@ -120,6 +120,159 @@ describe('canparl_get_bill production contract', () => {
     if (structured.notice) expect(trailer).toContain(structured.notice);
     return domain;
   }
+  it('outlines rendered overflow and pages whole nested records without loss', async () => {
+    const records = Array.from({ length: 7 }, (_, i) => ({
+      id: i,
+      nested: { text: 'é & '.repeat(800) },
+    }));
+    http.route({
+      match: detail(),
+      respond: Response.json([rawBill('C-901', { SenateVoteDetails: records })]),
+    });
+    const overview = await call();
+    expect(check(overview)).toMatchObject({ kind: 'outline', sections: expect.any(Array) });
+    expect(
+      Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, result: overview })),
+    ).toBeLessThanOrEqual(24_000);
+    const rebuilt: unknown[] = [];
+    let offset = 0;
+    do {
+      const reply = await call({
+        session: '45-1',
+        billCode: 'C-901',
+        section: 'senateVoteDetails',
+        offset,
+        limit: 3,
+      });
+      const page = check(reply);
+      expect(page.kind).toBe('section');
+      expect(page.senateVoteDetails?.length).toBeGreaterThan(0);
+      rebuilt.push(...(page.senateVoteDetails ?? []));
+      expect(
+        Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, result: reply })),
+      ).toBeLessThanOrEqual(24_000);
+      offset = page.pagination?.nextOffset ?? -1;
+    } while (offset !== -1);
+    expect(rebuilt).toEqual(records);
+  });
+  it('treats a blank section as unset and trims a selected section', async () => {
+    http.route({ match: detail(), respond: Response.json([rawBill()]) });
+    const full = check(await call({ session: '45-1', billCode: 'C-901', section: '   ' }));
+    expect(full.kind).toBeUndefined();
+    const selected = check(
+      await call({ session: '45-1', billCode: 'C-901', section: ' sponsor ' }),
+    );
+    expect(selected).toMatchObject({ kind: 'section', sponsor: full.sponsor });
+  });
+  it.each([
+    'stages.house',
+    'stages.senate',
+    'stages.royalAssent',
+    'divisions',
+    'senateVoteDetails',
+    'publications',
+  ])('keeps empty and past-end pages explicit for %s', async (section) => {
+    http.route({
+      match: detail(),
+      respond: Response.json([
+        rawBill('C-901', {
+          BillStages: {
+            HouseBillStages: [stage(1), stage(2)],
+            SenateBillStages: [],
+            RoyalAssent: [],
+          },
+          HouseVoteDetails: [],
+          SenateVoteDetails: [],
+          Publications: [],
+        }),
+      ]),
+    });
+    const reply = await call({ session: '45-1', billCode: 'C-901', section, offset: 99, limit: 1 });
+    expect(check(reply)).toMatchObject({
+      pagination: { offset: 99, nextOffset: null },
+      disclosure: expect.stringMatching(/past the end|no records/),
+    });
+  });
+  it.each(['sponsor', 'statute', 'stages.house', 'senateVoteDetails'])(
+    'returns sparse selected section %s with parity',
+    async (section) => {
+      http.route({ match: detail(), respond: Response.json([rawBill()]) });
+      expect(check(await call({ session: '45-1', billCode: 'C-901', section }))).toMatchObject({
+        kind: 'section',
+        pagination: { section, nextOffset: null },
+      });
+    },
+  );
+  it('returns an oversized indivisible nested record whole with disclosure', async () => {
+    const record = { nested: { text: ' &é'.repeat(9000) } };
+    http.route({
+      match: detail(),
+      respond: Response.json([rawBill('C-901', { SenateVoteDetails: [record] })]),
+    });
+    const result = check(
+      await call({ session: '45-1', billCode: 'C-901', section: 'senateVoteDetails', limit: 1 }),
+    );
+    expect(result.senateVoteDetails).toEqual([record]);
+    expect(result.disclosure).toContain('indivisible');
+    expect(result.pagination).toMatchObject({ total: 1, nextOffset: null });
+  });
+  it('pages deep chamber stages by whole records and retains the requested cap', async () => {
+    http.route({
+      match: detail(),
+      respond: Response.json([
+        rawBill('C-901', {
+          BillStages: {
+            HouseBillStages: [stage(1), stage(2)],
+            SenateBillStages: [],
+            RoyalAssent: [],
+          },
+        }),
+      ]),
+    });
+    const first = check(
+      await call({ session: '45-1', billCode: 'C-901', section: 'stages.house', limit: 1 }),
+    );
+    const second = check(
+      await call({
+        session: '45-1',
+        billCode: 'C-901',
+        section: 'stages.house',
+        offset: 1,
+        limit: 100,
+      }),
+    );
+    expect(first.stages?.house).toEqual([expectedStage(1, 'House')]);
+    expect(first.pagination).toMatchObject({ total: 2, nextOffset: 1, limit: 1 });
+    expect(second.stages?.house).toEqual([expectedStage(2, 'House')]);
+    expect(second.pagination).toMatchObject({ total: 2, nextOffset: null, limit: 100 });
+  });
+  it.each([{ section: 'missing' }, { offset: 1 }, { section: 'sponsor', offset: 1 }])(
+    'rejects incompatible selection %j with recovery',
+    async (selection) => {
+      http.route({ match: detail(), respond: Response.json([rawBill()]) });
+      const reply = await call({ session: '45-1', billCode: 'C-901', ...selection });
+      assertError(
+        reply,
+        'invalid_bill_section',
+        JsonRpcErrorCode.ValidationError,
+        'Choose an available section from the outline and use offset and limit only for collections.',
+      );
+      if (selection.section === 'missing') expect(JSON.stringify(reply)).toContain('stages.house');
+    },
+  );
+  it.each([{ offset: -1 }, { limit: 0 }, { limit: 101 }])(
+    'rejects invalid page %j before HTTP',
+    async (page) => {
+      const reply = await call({
+        session: '45-1',
+        billCode: 'C-901',
+        section: 'publications',
+        ...page,
+      });
+      expect(reply.isError).toBe(true);
+      expect(http.calls).toHaveLength(0);
+    },
+  );
   it('preserves every nested source leaf from both chambers and all dossier links', async () => {
     const source = rawBill('C-901', {
       SponsorPersonName: 'Synthetic Sponsor',

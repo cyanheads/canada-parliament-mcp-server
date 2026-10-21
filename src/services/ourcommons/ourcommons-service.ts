@@ -30,6 +30,7 @@ export class OurCommonsService {
     name: 'ourcommons',
     maxConcurrent: 2,
     minStartGapMs: 250,
+    maxQueueDepth: 20,
   });
   private readonly cache = new Map<string, CacheEntry>();
   constructor(private readonly config: ServerConfig = getServerConfig()) {}
@@ -49,6 +50,7 @@ export class OurCommonsService {
         data: structuredClone(cached.data) as T,
         provenance: [{ ...cached.source, cached: true }],
       };
+    if (cached) this.cache.delete(url);
     const deadlineAt = Date.now() + Math.min(20_000, request.remainingMs());
     const result = await withRetry(
       (attempt) =>
@@ -99,6 +101,12 @@ export class OurCommonsService {
       request.throwIfAborted();
       throw error;
     });
+    for (const [key, entry] of this.cache)
+      if (entry.expiresAt <= Date.now()) this.cache.delete(key);
+    if (this.cache.size >= 256) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
     this.cache.set(url, {
       data: structuredClone(result.data),
       source: result.source,

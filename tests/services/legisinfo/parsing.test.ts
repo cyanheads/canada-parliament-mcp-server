@@ -17,6 +17,21 @@ const identity = { ParliamentNumber: 45, SessionNumber: 1, NumberCode: 'C-901' }
 const dossier = (row: JsonRecord) => parseBillDossier([row], '45-1', 'C-901');
 
 describe('official bill records', () => {
+  it.each([
+    [{ IsHouseBill: true, IsSenateBill: false, OriginatingChamberOrganizationId: 1 }, 'House'],
+    [{ IsHouseBill: false, IsSenateBill: true, OriginatingChamberOrganizationId: 2 }, 'Senate'],
+    [{}, null],
+  ])('reconciles explicit originating chamber %j', (fields, chamber) => {
+    expect(parseBillSummary({ ...identity, ...fields }).originatingChamber).toBe(chamber);
+    expect(dossier({ ...identity, ...fields }).bill.originatingChamber).toBe(chamber);
+  });
+  it.each([
+    { OriginatingChamberNameEn: 'Senate', IsHouseBill: true },
+    { IsHouseBill: true, IsSenateBill: true },
+    { OriginatingChamberOrganizationId: 1, IsHouseBill: false },
+  ])('rejects contradictory chamber evidence %j', (fields) => {
+    expect(() => parseBillSummary({ ...identity, ...fields })).toThrow();
+  });
   it('reads nested chamber stages and retains variable event depth', () => {
     const event = {
       EventNameEn: 'Synthetic event',

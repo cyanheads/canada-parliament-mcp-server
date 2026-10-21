@@ -34,7 +34,12 @@ interface CacheEntry {
 
 /** Official source service; each operation uses its caller's existing request budget. */
 export class LegisinfoService implements Disposable {
-  private readonly pacer = createPacer({ name: 'legisinfo', maxConcurrent: 2, minStartGapMs: 250 });
+  private readonly pacer = createPacer({
+    name: 'legisinfo',
+    maxConcurrent: 2,
+    minStartGapMs: 250,
+    maxQueueDepth: 20,
+  });
   private readonly cache = new Map<string, CacheEntry>();
   private verifiedCurrent: string | undefined;
   private currentSource: Source | undefined;

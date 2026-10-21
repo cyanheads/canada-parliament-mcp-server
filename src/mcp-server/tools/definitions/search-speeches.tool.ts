@@ -140,17 +140,11 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
     appliedFilters: z
       .object({
         politician: z.string().nullable().describe('Normalized verified speaker slug, or null.'),
-        billDebated: z
-          .string()
-          .nullable()
-          .describe('Exact applied bill_debated source path, or null.'),
-        mentionedBill: z
-          .string()
-          .nullable()
-          .describe('Exact applied mentioned_bill source path, or null.'),
+        billDebated: z.string().nullable().describe('Selected debated-bill path, or null.'),
+        mentionedBill: z.string().nullable().describe('Selected mentioned-bill path, or null.'),
         dateFrom: z.string().nullable().describe('Inclusive normalized lower date, or null.'),
         dateTo: z.string().nullable().describe('Inclusive normalized upper date, or null.'),
-        substantiveOnly: z.boolean().describe('Whether procedural=false was applied and verified.'),
+        substantiveOnly: z.boolean().describe('Whether procedural remarks were excluded.'),
         contains: z
           .string()
           .nullable()

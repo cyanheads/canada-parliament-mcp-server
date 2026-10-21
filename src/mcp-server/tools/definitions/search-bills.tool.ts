@@ -174,9 +174,7 @@ export const searchBillsTool = tool('canparl_search_bills', {
       } catch (error) {
         if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.ValidationError)
           throw error;
-        const failure = ctx.fail('invalid_bill_filter');
-        Object.assign(failure, { cause: error });
-        throw failure;
+        throw ctx.fail('invalid_bill_filter', undefined, undefined, { cause: error });
       }
       const sponsor = input.sponsor ? normalizeSlug(input.sponsor) : null;
       let sponsorKeys: Set<string> | null = null;
@@ -188,9 +186,7 @@ export const searchBillsTool = tool('canparl_search_bills', {
         } catch (error) {
           request.throwIfAborted();
           if (error instanceof McpError && error.code === JsonRpcErrorCode.NotFound) {
-            const failure = ctx.fail('sponsor_not_found');
-            Object.assign(failure, { cause: error });
-            throw failure;
+            throw ctx.fail('sponsor_not_found', undefined, undefined, { cause: error });
           }
           throw error;
         }

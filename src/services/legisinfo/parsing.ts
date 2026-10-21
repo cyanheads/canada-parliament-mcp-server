@@ -136,17 +136,32 @@ export function parseBillSummary(row: JsonRecord): BillSummary {
   const origin = text(row.OriginatingChamberNameEn);
   if (origin !== null && !['House of Commons', 'House', 'Senate'].includes(origin))
     invalidResponse();
+  const organization = integer(row.OriginatingChamberOrganizationId);
+  if (organization !== null && organization !== 1 && organization !== 2) invalidResponse();
+  const house = bool(row.IsHouseBill);
+  const senate = bool(row.IsSenateBill);
+  const evidence = (
+    [
+      origin === null ? null : origin === 'Senate' ? 'Senate' : 'House',
+      organization === null ? null : organization === 1 ? 'House' : 'Senate',
+      house === true ? 'House' : null,
+      senate === true ? 'Senate' : null,
+    ] satisfies BillSummary['originatingChamber'][]
+  ).filter((value) => value !== null);
+  const identities = new Set(evidence);
+  if (identities.size > 1) invalidResponse();
+  const originatingChamber = evidence[0] ?? null;
+  if (
+    (originatingChamber === 'House' && house === false) ||
+    (originatingChamber === 'Senate' && senate === false)
+  )
+    invalidResponse();
   return {
     ...identity,
     longTitle: bilingual(row, 'LongTitle'),
     shortTitle: bilingual(row, 'ShortTitle'),
     billType: text(row.BillDocumentTypeNameEn),
-    originatingChamber:
-      origin === 'House of Commons' || origin === 'House'
-        ? 'House'
-        : origin === 'Senate'
-          ? 'Senate'
-          : null,
+    originatingChamber,
     status: text(row.StatusNameEn),
     latestMajorStage: name === null && chamber === null ? null : { name, chamber },
     royalAssentDate: text(row.ReceivedRoyalAssentDateTime),
