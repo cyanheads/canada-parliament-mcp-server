@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/canada-parliament-mcp-server</h1>
   <p><b>Track Canadian federal bills, MPs, House votes, and Hansard speeches via MCP. STDIO or Streamable HTTP.</b>
-  <div>8 Tools • 0 Resources • 0 Prompts</div>
+  <div>8 Tools</div>
   </p>
 </div>
 
@@ -30,7 +30,7 @@ Canadian federal parliamentary records from [LEGISinfo](https://www.parl.ca/legi
 | Tool | Description |
 |:---|:---|
 | `canparl_search_bills` | Search a session's official bills by title, number, chamber, type, status, or indexed MP sponsor |
-| `canparl_get_bill` | Read an official bill dossier, stages, divisions, publications, and enacted statute citation |
+| `canparl_get_bill` | Read an official bill dossier: sponsor and title, stages, reading milestones, divisions, publications, legislative summary, notes, web references, and enacted statute citation |
 | `canparl_search_members` | Search the current House roster or OpenParliament's historical name index |
 | `canparl_get_member` | Read a member profile, dated memberships, sponsored bills, and recent ballots |
 | `canparl_search_votes` | Search recorded House divisions by bill, result, document type, date, or subject |
@@ -42,63 +42,69 @@ Canadian federal parliamentary records from [LEGISinfo](https://www.parl.ca/legi
 
 ### `canparl_search_bills` <sub>tool</sub>
 
-- Combine `titleContains`, `billCode`, `originatingChamber`, `billType`, `status`, and `sponsor` with AND; `limit` 1–100 (default 25), `offset` default 0
-- Returns official bilingual titles, status, latest major stage, royal assent date, exact filtered `total`, and `pagination.nextOffset`
-- `sponsor` takes a returned MP OpenParliament slug and restricts results to its index (`sponsorCoverage: "openparliament_index"`); Senators are outside that index. A scan exceeding ten 100-row pages fails with `sponsor_scan_incomplete` rather than returning an incomplete set
+- `titleContains`, `billCode`, `originatingChamber`, `billType`, `status`, and `sponsor`, combined with AND; `limit` 1–100 (default 25; values up to 10,000 clamp to 100 with a notice) with offset pagination
+- Bilingual titles, status, latest major stage, and royal assent date, with the exact filtered `total` and `pagination.nextOffset`
+- `sponsor` takes an OpenParliament slug, `/politicians/` path, or profile URL (`member.slug` from `canparl_get_member`, or an `includeFormer` search row), or a current MP's `personId`. A digit-only value equal to a current `personId`, or its `/politicians/<digits>/` path or URL, resolves through the same verified crosswalk as `canparl_get_member`; `appliedFilters.sponsorName` names the profile used
+- Sponsor results cover only OpenParliament's index (`sponsorCoverage: "openparliament_index"`), which excludes Senators; a scan past ten 100-row pages fails as `sponsor_scan_incomplete`
 
 ---
 
 ### `canparl_get_bill` <sub>tool</sub>
 
-- Supply `billCode` from search and its `session`; returns sponsor, House/Senate/royal-assent stages with nested records, House divisions, source-specific Senate vote records, publications, and `statute` when available
-- Dossiers above a 24,000-byte serialized response budget return `kind: "outline"` with section selectors: `sponsor`, `stages.house`, `stages.senate`, `stages.royalAssent`, `divisions`, `senateVoteDetails`, `publications`, `statute`. Re-call with `section`; collections accept `offset` (default 0) and `limit` 1–100 (default 20), continued through `pagination.nextOffset`
-- Section pages preserve whole records and may contain fewer than `limit` to fit the budget. An indivisible record or scalar section above the budget is returned whole with `disclosure`; `null`, empty collections, and past-end offsets remain distinguishable
+- `billCode` and its `session` from `canparl_search_bills`; returns the sponsor and their affiliation `title`, House/Senate/royal-assent stages, House divisions (`dateTime` is the LEGISinfo sitting date-time, not when the division was recorded), Senate vote records, publications, and `statute`
+- Also the Library of Parliament legislative `summary` and dossier `notes` as plain text (each note link kept as `text (href)`), the six reading `milestones` as UTC instants, and related `webReferences` (press releases, background documents, costing notes) whose URLs are relayed as published, never fetched
+- Above a 24,000-byte response budget, returns `kind: "outline"` with `sponsor`, `statute`, and `milestones` inline, listing the sections `sponsor`, `stages.house`, `stages.senate`, `stages.royalAssent`, `divisions`, `senateVoteDetails`, `publications`, `statute`, `summary.en`, `summary.fr`, `notes.en`, `notes.fr`, `milestones`, and `webReferences`; re-call with `section`, paging collections by `offset` and `limit` (1–100, default 20; values up to 10,000 clamp to 100 with a notice) through `pagination.nextOffset`
+- Pages hold whole records; an indivisible record or language section over the budget returns whole with `disclosure`, and null, empty, and past-end sections stay distinct
 
 ---
 
 ### `canparl_search_members` <sub>tool</sub>
 
-- Current roster: literal `name`/`riding` substrings plus `province` and `party`; `limit` 1–100 (default 25), offset pagination, and exact filtered `total`
-- `includeFormer: true` selects the historical index: one name token searches a surname, multiple tokens a full recorded name; riding/province/party filters are unsupported. Historical rows can contain only name and slug, with `total: null`
-- Pass a returned `detailLookup` unchanged to `canparl_get_member`; official `personId` and OpenParliament `slug` are distinct identifiers
+- Current roster: `name` and `riding` substrings, `province` (postal code or full name), and `party`; `limit` 1–100 (default 25; values up to 10,000 clamp to 100 with a notice) with the exact filtered `total`
+- `includeFormer: true` searches OpenParliament's historical name index instead: one token matches a surname, several match a full recorded name. Geographic and party filters are rejected there, rows may carry only a name and slug, and `total` is `null`
+- Pass `detailLookup` unchanged to `canparl_get_member`: current rows carry an official `personId`, historical rows an OpenParliament `slug`
 
 ---
 
 ### `canparl_get_member` <sub>tool</sub>
 
-- Supply exactly one `personId` or `slug` from `detailLookup`; returns a public profile and dated `memberships` where available
-- Independent `sponsoredBills` (0–5, default 5) and `recentVotes` (0–10, default 10) limits, with `billsOffset`/`votesOffset` and each section's `nextOffset`; set both limits to 0 for profile-only lookup
-- Optional enrichment failures preserve the official profile. Activity sections distinguish `available`, `unavailable`, and `not_requested`, with `failure` metadata; unavailable history is never an empty-history claim
+- Exactly one `personId` or `slug` from `detailLookup`; returns the profile and dated `memberships`. A digit-only `slug` equal to a current `personId`, or its `/politicians/<digits>/` path or URL, is read as that `personId`
+- `sponsoredBills` (0–5, default 5) and `recentVotes` (0–10, default 10) page independently through `billsOffset` and `votesOffset`; `0` skips a section, and values up to 10,000 clamp to the cap with a notice
+- With one official `personId`, ballots come newest first from the official member-votes feed in one request, for the member's latest session or `votesSession`, optionally narrowed by `votesBillCode`. `ballot` reads `Yes`/`No`/`Paired`, `officialBallot` keeps `Yea`/`Nay`/`Paired`, and `source` names the feed; other members keep OpenParliament ballots
+- Each activity section reports `available`, `unavailable`, or `not_requested`, with `failure` metadata; unavailable history is never reported as empty
+- Profile `links` are never fetched: an absolute `http` or `https` URL is relayed as published, and a relative value is resolved against `https://openparliament.ca`
 
 ---
 
 ### `canparl_search_votes` <sub>tool</sub>
 
-- Combine `billCode`, `result`, `documentType`, `dateFrom`, `dateTo`, and `subjectContains`; dates are inclusive Ottawa civil dates. `limit` 1–100 (default 25), offset pagination
-- Returns newest divisions first, official result wording and tallies, exact filtered `total`, and `pagination.nextOffset`; use returned `session` and `number` with `canparl_get_vote`
+- `billCode`, `result` (`Agreed To`, `Negatived`, `Tie`), `documentType`, inclusive Ottawa-date `dateFrom` and `dateTo`, and `subjectContains`; `limit` 1–100 (default 25; values up to 10,000 clamp to 100 with a notice) with offset pagination
+- Newest first, with official tallies and the exact filtered `total`; pass `session` and `number` to `canparl_get_vote`
 
 ---
 
 ### `canparl_get_vote` <sub>tool</sub>
 
-- Supply `number` and its `session`; optional `party`/`province` filters affect only the ballot page. `limit` 1–400 (default 100), offset pagination
-- `tally`, `byParty`, and `ballotsTotal` describe the full division; `ballotsMatched` describes the filtered set. `tallyMatchesBallots` flags discrepancies without rewriting either source count
-- Ballots are `Yea`, `Nay`, or `Paired`; nonvoters are absent, and paired records are counted individually
+- `number` and its `session`; `ballot` (`Yea`, `Nay`, `Paired`; `Yes`/`No` accepted), `personId`, `party`, and `province` filter only the ballot page; `limit` 1–400 (default 30; values up to 10,000 clamp to 400 with a notice) with offset pagination
+- `tally`, `byParty`, and `ballotsTotal` cover the whole division and `ballotsMatched` the filtered set; `tallyMatchesBallots` flags a disagreement without changing either count
+- Ballots are `Yea`, `Nay`, or `Paired`; nonvoters are not listed, so a `personId` with no ballot returns an empty page
+- A page stops at a 24,000-byte response budget with `truncated` and a notice; follow `nextOffset` for the rest
 
 ---
 
 ### `canparl_search_speeches` <sub>tool</sub>
 
-- Require at least one `politician`, `billDebated`, `mentionedBill`, `dateFrom`, or `dateTo`; bill scopes require explicit `{ session, code }`. Filters combine with AND; optional `contains` is a literal English-text substring and cannot be the sole scope
-- `limit` 1–10 (default 5); scans at most 100 raw candidates per call. Continue `nextOffset` with identical filters until `exhausted` before drawing a negative conclusion; even an exhausted search describes OpenParliament's index, not all parliamentary speech
-- Complete English `content` and speech-date party/riding are returned when available, otherwise `null`. `substantiveOnly` defaults true; set false to include procedural remarks. Committee records are excluded and counted in `excludedCommittees`
+- Needs a scope: `politician`, `billDebated` or `mentionedBill` (`{ session, code }`), `dateFrom`, or `dateTo`; `contains` is a literal English substring and never a scope on its own. `limit` 1–10 (default 5; values up to 10,000 clamp to 10 with a notice), and a page stops at a 24,000-byte response budget, returning at least one speech whole
+- `politician` takes the same slug, path, URL, or current `personId` values as `canparl_search_bills` `sponsor`, resolved the same way; `appliedFilters.politicianName` names the profile used
+- Scans at most 100 raw candidates per call: follow `nextOffset` with identical filters until `exhausted` before concluding there is no match, and even then the answer covers OpenParliament's index only
+- Complete English `content` with speech-date party and riding (`null` when unavailable); `substantiveOnly` (default `true`) drops procedural remarks, and committee records are excluded and counted in `excludedCommittees`
 
 ---
 
 ### `canparl_list_reference` <sub>tool</sub>
 
-- Required `topic`: `sessions`, `bill_types`, `bill_statuses`, `vote_results`, `vote_document_types`, or `parties`; returns the complete reference set without pagination
-- For `sessions`, omit `session`; entries distinguish `basic`/`full` bill coverage and advertised House division coverage. Other topics accept a session and mark whether vocabulary was actually `observed` in its feed
+- `topic`: `sessions`, `bill_types`, `bill_statuses`, `vote_results`, `vote_document_types`, or `parties`; returns the complete set without pagination
+- `sessions` takes no `session` and reports `basic` or `full` bill coverage and House division coverage per session; other topics take a session and mark each value `observed` in its feed
 
 ## Features
 
@@ -106,20 +112,20 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 Canadian Parliament-specific:
 
-- Official bill coverage begins at session `35-1` (1994); full dossiers begin at `37-1` (2001). House division coverage begins at `38-1` (2004). Discover supported sessions with `canparl_list_reference`; OpenParliament's historical name index reaches 1994, with source-dependent activity coverage
-- Bills cover both chambers; member, division, and speech tools cover the House. Missing historical fields remain `null`
-- A session accepts `"45-1"` or `{ "parliament": 45, "session": 1 }`; omitted sessions resolve from the current official bill feed, except explicit speech bill scopes
-- Shared source pacing, short-lived in-memory caches, retries, and one 50-second tool deadline. OpenParliament requests are serialized with a two-second start gap; large member activity requests can take tens of seconds
+- Official bill coverage from session `35-1` (1994), full dossiers from `37-1` (2001), and House divisions from `38-1` (2004); OpenParliament's historical name index reaches 1994
+- Bills cover both chambers; member, division, and speech tools cover the House of Commons. Missing historical fields stay `null`
+- Sessions accept `"45-1"` or `{ "parliament": 45, "session": 1 }`; an omitted session resolves from the current official bill feed, except in speech bill scopes
+- Shared source pacing, short-lived in-memory caches, retries, and one 50-second tool deadline. OpenParliament requests are serialized with a two-second start gap, so sponsored bills and OpenParliament ballots can take tens of seconds
 
 Agent-friendly output:
 
-- Provenance — `source`, `url`, original `retrievedAt`, and `cached` accompany every successful retrieval
-- Explicit coverage — normalized `appliedFilters`, continuation fields, notices, and typed failure reasons distinguish no matches from unavailable or incomplete data
-- Lossless client surfaces — Markdown `content[]` and `structuredContent` carry the same values, including source text and nested stage records
+- Provenance: `source`, `url`, original `retrievedAt`, and `cached` on every successful retrieval
+- Explicit coverage: normalized `appliedFilters`, continuation fields, notices, and typed failure reasons separate no matches from unavailable or incomplete data
+- Both surfaces: every `structuredContent` value, complete source text included, also renders in Markdown `content[]`
 
 ## Getting started
 
-Add the following to your MCP client configuration file:
+Add the following to your MCP client configuration file.
 
 ```json
 {
@@ -128,7 +134,10 @@ Add the following to your MCP client configuration file:
       "type": "stdio",
       "command": "bunx",
       "args": ["@cyanheads/canada-parliament-mcp-server@latest"],
-      "env": { "MCP_TRANSPORT_TYPE": "stdio", "MCP_LOG_LEVEL": "info" }
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_LOG_LEVEL": "info"
+      }
     }
   }
 }
@@ -143,7 +152,10 @@ Or with npx (no Bun required):
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@cyanheads/canada-parliament-mcp-server@latest"],
-      "env": { "MCP_TRANSPORT_TYPE": "stdio", "MCP_LOG_LEVEL": "info" }
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_LOG_LEVEL": "info"
+      }
     }
   }
 }
@@ -163,7 +175,7 @@ Or with Docker:
 }
 ```
 
-For Streamable HTTP, start the built server from a local checkout:
+For Streamable HTTP, set the transport and start the server:
 
 ```sh
 MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
@@ -172,73 +184,97 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher, or Node.js v24+
-- Internet access to Parliament and OpenParliament; no upstream API key required
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- Internet access to parl.ca, ourcommons.ca, and openparliament.ca; no API key is required.
 
 ### Installation
 
+1. **Clone the repository:**
+
 ```sh
 git clone https://github.com/cyanheads/canada-parliament-mcp-server.git
+```
+
+2. **Navigate into the directory:**
+
+```sh
 cd canada-parliament-mcp-server
+```
+
+3. **Install dependencies:**
+
+```sh
 bun install
+```
+
+4. **Configure environment:**
+
+```sh
 cp .env.example .env
-bun run rebuild
+# optional: set CANPARL_USER_AGENT to identify your deployment to the upstream sources
 ```
 
 ## Configuration
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `CANPARL_USER_AGENT` | Optional upstream HTTP identification; blank uses the default, CR/LF forbidden | `canada-parliament-mcp-server (casey@caseyjhand.com; https://github.com/cyanheads/canada-parliament-mcp-server)` |
-| `MCP_TRANSPORT_TYPE` | `stdio` or `http` | `stdio` |
-| `MCP_HTTP_HOST` | HTTP bind address | `127.0.0.1` |
-| `MCP_HTTP_PORT` | HTTP port | `3010` |
-| `MCP_SESSION_MODE` | `stateless`, `stateful`, or `auto` | `stateless` |
-| `MCP_AUTH_MODE` | `none`, `jwt`, or `oauth` | `none` |
-| `MCP_LOG_LEVEL` | Minimum log level | `info` |
-| `LOGS_DIR` | File log directory (Node.js only) | `<app-root>/logs` |
-| `STORAGE_PROVIDER_TYPE` | Framework storage backend | `in-memory` |
-| `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
+| `CANPARL_USER_AGENT` | HTTP User-Agent sent to the upstream sources. Blank uses the default; CR and LF are rejected. | `canada-parliament-mcp-server (casey@caseyjhand.com; https://github.com/cyanheads/canada-parliament-mcp-server)` |
+| `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
+| `MCP_HTTP_HOST` | HTTP bind address. | `127.0.0.1` |
+| `MCP_HTTP_PORT` | HTTP server port. | `3010` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
+| `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
+| `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
+| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
-See [`.env.example`](./.env.example) for common framework overrides.
+See [`.env.example`](./.env.example) for every server setting and the common framework overrides.
 
 ## Running the server
 
-```sh
-bun run rebuild       # Clean and build
-bun run start:stdio   # Built server over stdio
-bun run start:http    # Built server over Streamable HTTP
-```
+### Local development
 
-For a local HTTP container:
+- **Build and run the production version**:
 
-```sh
-docker build -t canada-parliament-mcp-server .
-docker run --rm -p 127.0.0.1:3010:3010 canada-parliament-mcp-server
-```
+  ```sh
+  # One-time build
+  bun run rebuild
+
+  # Run the built server
+  bun run start:http
+  # or
+  bun run start:stdio
+  ```
+
+- **Run checks and tests**:
+  ```sh
+  bun run devcheck  # Lints, formats, type-checks, and more
+  bun run test      # Runs the test suite
+  ```
 
 ## Project structure
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools/definitions` | Eight tools and shared Markdown rendering |
-| `src/services/legisinfo` | Official bill JSON, session discovery, pacing, and cache |
-| `src/services/ourcommons` | Official current roster and division XML |
-| `src/services/openparliament` | Historical identities, activity, speeches, and memberships |
-| `src/domain` | Shared schemas, normalization, vocabulary, and request budgets |
-| `src/config` | Server-specific environment parsing |
-| `tests` | Parser, service, tool, and integration tests with synthetic upstream fixtures |
+| `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`), the shared Markdown renderer, and the shared member-identity crosswalk. |
+| `src/services/legisinfo` | LEGISinfo service — session discovery, official bill lists and dossiers. |
+| `src/services/ourcommons` | House of Commons service — current roster, division, and member-vote XML. |
+| `src/services/openparliament` | OpenParliament service — historical identities, activity, speeches, and memberships. |
+| `src/domain` | Shared schemas, normalization, reference vocabulary, and request budgets. |
+| `src/config` | Server-specific environment variable parsing and validation with Zod. |
+| `tests/` | Parser, service, tool, and integration tests over synthetic upstream fixtures. |
 
 See [`docs/tree.md`](./docs/tree.md) for the full tree.
 
 ## Development guide
 
-See [`CLAUDE.md`](./CLAUDE.md) or [`AGENTS.md`](./AGENTS.md) for development rules.
+See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
 
-- Register tools in `src/index.ts`; keep source parsing and transport in their owning services
-- Validate upstream data and preserve unavailable fields rather than inventing values
-- Declare typed errors and render every returned value on both client surfaces
-- Test real parsers and handlers through the fake HTTP boundary
+- Handlers throw, framework catches; catch only to translate a known source failure or keep optional enrichment
+- Use `ctx.log` for logging and `ctx.enrich` for applied filters, totals, and notices
+- Register new tools in the `createApp()` arrays in `src/index.ts`
+- Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
 
 ## Contributing
 
@@ -251,4 +287,4 @@ bun run test
 
 ## License
 
-Code is licensed under [Apache 2.0](./LICENSE). Parliamentary data is an unofficial reproduction credited to Parliament and, where used, OpenParliament; Parliament retains copyright. Reuse is governed separately by [Parliament notices](https://www.parl.ca/ImportantNotices-e.html), [Speaker's Permission](https://www.ourcommons.ca/en/important-notices#SpeakersPermission), [Senate terms](https://sencanada.ca/en/intellectual-property/), and [OpenParliament API terms](https://openparliament.ca/api/). This free, noncommercial relay does not imply government endorsement or an open-data licence.
+Code is licensed under [Apache 2.0](./LICENSE). Parliamentary data is an unofficial reproduction credited to Parliament and, where used, OpenParliament; Parliament retains copyright. Reuse is governed separately by the [Parliament notices](https://www.parl.ca/ImportantNotices-e.html), the [Speaker's Permission](https://www.ourcommons.ca/en/important-notices#SpeakersPermission), the [Senate terms](https://sencanada.ca/en/intellectual-property/), and the [OpenParliament API terms](https://openparliament.ca/api/). This free, noncommercial relay does not imply government endorsement or an open-data licence.

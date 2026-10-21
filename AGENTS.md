@@ -66,8 +66,8 @@ All definitions use `formatResult` from `_format.ts`, with reversible Markdown v
 | Service | Owned data |
 |:---|:---|
 | `legisinfo` | Official sessions, current session, complete session bill lists, dossiers |
-| `ourcommons` | Current House roster, division sessions/lists/participants |
-| `openparliament` | Historical identities, sponsored bills, ballots, speeches, dated memberships |
+| `ourcommons` | Current House roster, division sessions/lists/participants, member votes |
+| `openparliament` | Historical identities, sponsored bills, ballots for members without one official personId, speeches, dated memberships |
 
 `setup()` initializes all three services; `teardown()` disposes their pacers and caches. HTTP defaults to stateless. Source caches hold parsed public data only; no durable personal-data store.
 
@@ -78,12 +78,13 @@ Requests use fixed HTTPS origins `www.parl.ca`, `www.ourcommons.ca`, and `api.op
 ### Domain constraints
 
 - Bills cover both chambers; members, divisions, and speeches cover the House only. Early bill sessions have basic coverage and nullable dossier fields.
-- Official `personId` and OpenParliament `slug` are distinct. Use returned `detailLookup` and verified crosswalks, never name-derived slugs.
+- Official `personId` and OpenParliament `slug` are distinct. Use returned `detailLookup` and verified crosswalks, never name-derived slugs. Slug inputs (`slug`, `sponsor`, `politician`) read a digit-only value equal to a current personId, or its `/politicians/<digits>/` path or profile URL, through the shared crosswalk in `_member-identity.ts`, the roster first; every other numeric value is an OpenParliament ID. Never request `/politicians/{personId}/`.
 - Sponsor filtering is the OpenParliament-indexed subset; a bounded incomplete scan fails rather than inventing completeness.
 - Current-member search filters the complete roster. Historical name lookup stays sparse and rejects unsupported geographic/caucus filters.
 - Speech `contains` is a bounded scan with raw-offset continuation and `exhausted`. Hydrate affiliations from dated memberships, never current attributes.
-- Large bill dossiers return an outline above a 24,000-byte serialized response budget. Section pages preserve nested records whole; oversized indivisible records return with disclosure.
-- Preserve source-specific vote vocabulary and full tallies independently of ballot-page filters.
+- One 24,000-byte complete-response budget and measure (`_format.ts`) bound `canparl_get_bill`, `canparl_get_vote`, and `canparl_search_speeches`; they render every enrichment field through `renderValue` so the measure equals the wire. Large bill dossiers return an outline; pages hold whole records and stop before the one that would exceed the budget, returning at least one; oversized indivisible records return with disclosure.
+- Preserve source-specific vote vocabulary and full tallies independently of ballot-page filters. `canparl_get_member` ballots keep OpenParliament's `Yes`/`No` in `ballot` on every row and carry the official `Yea`/`Nay`/`Paired` in `officialBallot`.
+- Profile links are never fetched: an absolute `http` or `https` URL without credentials is relayed as published, any other non-empty value is resolved against `https://openparliament.ca`, and empty, credentialed, `mailto:`, `javascript:`, `data:`, and `ftp:` values are rejected; only `https://` values render as links.
 - Tests run real parsers/services/handlers through synthetic fake HTTP responses, not mocked domain service methods.
 - Parliamentary data is unofficial and subject to its source reuse terms. Do not imply government endorsement or an open-data licence.
 
@@ -159,7 +160,7 @@ src/
     legisinfo/                    # index, service, parsing, types
     ourcommons/                   # index, service, parsing, types
     openparliament/               # index, service, parsing, types
-  mcp-server/tools/definitions/   # eight *.tool.ts definitions and _format.ts
+  mcp-server/tools/definitions/   # eight *.tool.ts definitions, _format.ts, and _member-identity.ts
 tests/
   config/
   domain/

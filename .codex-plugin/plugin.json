@@ -10,7 +10,7 @@
   "homepage": "https://github.com/cyanheads/canada-parliament-mcp-server#readme",
   "repository": "https://github.com/cyanheads/canada-parliament-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "canada", "parliament", "legisinfo", "hansard", "bills", "votes", "typescript", "bun", "stdio", "streamable-http"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "canada", "parliament", "house-of-commons", "legisinfo", "openparliament", "hansard", "bills", "legislation", "votes", "typescript", "bun", "stdio", "streamable-http"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "canada-parliament-mcp-server",
