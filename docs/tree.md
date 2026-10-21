@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-21 03:39:33
+Generated on: 2026-10-21 04:04:00
 
 ```text
 canada-parliament-mcp-server/
@@ -179,6 +179,8 @@ canada-parliament-mcp-server/
 │   ├── fixtures/
 │   │   ├── bill-tools/
 │   │   │   └── harness.ts
+│   │   ├── integration/
+│   │   │   └── upstream-preload.ts
 │   │   ├── member-tools/
 │   │   │   └── harness.ts
 │   │   ├── speech-tools/
@@ -187,6 +189,7 @@ canada-parliament-mcp-server/
 │   │       └── harness.ts
 │   ├── fuzz/
 │   ├── integration/
+│   │   └── parliament-server.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/
@@ -225,6 +228,7 @@ canada-parliament-mcp-server/
 ├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
