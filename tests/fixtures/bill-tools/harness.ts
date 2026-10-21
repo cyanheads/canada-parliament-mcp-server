@@ -3,13 +3,19 @@
  * @module tests/fixtures/bill-tools/harness
  */
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { expect, vi } from 'vitest';
+import type { JsonRecord } from '@/domain/schemas.js';
+import { RESPONSE_BUDGET, responseBytes } from '@/mcp-server/tools/definitions/_format.js';
 import { disposeLegisinfoService, initLegisinfoService } from '@/services/legisinfo/index.js';
 import {
   disposeOpenParliamentService,
   initOpenParliamentService,
 } from '@/services/openparliament/index.js';
+import { decodeBun, decodeBunFields, expectExact } from '../markdown-decode.js';
+
+export { expectExact } from '../markdown-decode.js';
 
 export const picker = 'https://www.parl.ca/legisinfo/en/bills';
 export const current = `${picker}/json`;
@@ -30,9 +36,18 @@ export const rawBill = (code = 'C-901', extra: Record<string, unknown> = {}) => 
   StatusNameEn: 'At second reading in the House of Commons',
   LatestCompletedMajorStageNameEn: 'First reading',
   LatestCompletedMajorStageChamberNameEn: 'House of Commons',
+  LatestCompletedMajorStageChamberOrganizationId: 1,
   ReceivedRoyalAssentDateTime: null,
   ...extra,
 });
+/**
+ * Captured LEGISinfo dossier response bodies (2026-10-21). Values are verbatim; the 35-1 record is
+ * whole, the others keep their identity, sponsor, statute, and reading fields plus the fields their
+ * tests exercise (notes, summaries, web references, publications).
+ */
+export const realDossier = (
+  name: '35-1-c-1' | '41-1-c-38' | '42-1-c-86' | '44-1-c-69' | '45-1-c-15',
+): string => readFileSync(new URL(`./dossiers/${name}.json`, import.meta.url), 'utf8');
 
 /** Fresh real service accessors with only the HTTP boundary replaced. */
 export function setup() {
@@ -100,27 +115,19 @@ console.log(JSON.stringify(result));`,
     ),
   ) as Parsed;
 }
-/** Independent expected label/leaf walk verifies every field, row, and nested value. */
-export function expectedText(value: unknown, key = 'value'): string {
-  if (Array.isArray(value))
-    return `${key}: ${value.length ? '[array]' : '[]'}${value.map((item, i) => expectedText(item, String(i))).join('')}`;
-  if (value !== null && typeof value === 'object') {
-    const entries = Object.entries(value);
-    return `${key}: ${entries.length ? '[object]' : '{}'}${entries.map(([name, item]) => expectedText(item, name)).join('')}`;
-  }
-  return `${key}:${value === '' ? '' : ` ${String(value)}`}`;
-}
-/** Check a whole domain body independently from the framework's trailer formatting. */
+const textOf = (blocks: readonly { type: string; text?: string }[]) =>
+  blocks
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text ?? '')
+    .join('\n');
+/** Structurally decode a whole domain body: keys, order, nesting, scalar types, and links. */
 export function assertDomainParity(
   value: unknown,
   blocks: readonly { type: string; text?: string }[],
 ) {
-  const markdown = blocks
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text ?? '')
-    .join('\n');
-  const parsed = parseMarkdown(markdown);
-  expect(parsed.text).toBe(expectedText(value));
+  const markdown = textOf(blocks);
+  const decoded = decodeBun(markdown);
+  expectExact(decoded.value, value);
   const urls: string[] = [];
   const walk = (node: unknown): void => {
     if (typeof node === 'string' && node.startsWith('https://')) urls.push(node);
@@ -128,9 +135,36 @@ export function assertDomainParity(
     else if (node && typeof node === 'object') Object.values(node).forEach(walk);
   };
   walk(value);
-  expect(parsed.links).toEqual(urls.map((url) => ({ text: url, href: url })));
-  expect(parsed.images).toEqual([]);
+  expect(decoded.links).toEqual(urls.map((url) => ({ text: url, href: url })));
+  expect(decoded.images).toEqual([]);
   expect(markdown).not.toContain('```');
+}
+/** Decode the enrichment trailer's rendered fields, skipping the framework's own lines. */
+export function trailerFields(blocks: readonly { type: string; text?: string }[]): JsonRecord {
+  return decodeBunFields(textOf(blocks));
+}
+/** UTF-8 bytes of the JSON-RPC response carrying `result`, with a 256-byte request id. */
+export function wireBytes(result: unknown): number {
+  return Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result }), 'utf8');
+}
+/**
+ * A budgeted tool's complete response: every declared enrichment field decodes exactly, in order,
+ * from its trailer; the shared measure equals the wire; and two or more records fit the budget.
+ */
+export function assertMeasuredResponse(
+  result: { structuredContent?: unknown; content: readonly { type: string; text?: string }[] },
+  definition: { enrichment?: Record<string, unknown>; output: { parse(value: unknown): unknown } },
+  records?: readonly unknown[],
+): number {
+  const data = result.structuredContent as JsonRecord;
+  const enrichment: JsonRecord = {};
+  for (const key of Object.keys(definition.enrichment ?? {}))
+    if (key in data) enrichment[key] = data[key] as JsonRecord[string];
+  expectExact(trailerFields(result.content.slice(1)), enrichment);
+  const wire = wireBytes(result);
+  expect(responseBytes(definition.output.parse(data), enrichment)).toBe(wire);
+  if (records && records.length > 1) expect(wire).toBeLessThanOrEqual(RESPONSE_BUDGET);
+  return wire;
 }
 
 /** Both envelopes contain the declared error and actionable recovery. */

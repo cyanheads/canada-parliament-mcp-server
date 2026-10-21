@@ -3,7 +3,13 @@ import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { expect, vi } from 'vitest';
 import { disposeLegisinfoService, initLegisinfoService } from '@/services/legisinfo/index.js';
 import { disposeOurCommonsService, initOurCommonsService } from '@/services/ourcommons/index.js';
-import { assertDomainParity, expectedText, parseMarkdown } from '../bill-tools/harness.js';
+import {
+  assertDomainParity,
+  assertMeasuredResponse,
+  expectExact,
+  parseMarkdown,
+  trailerFields,
+} from '../bill-tools/harness.js';
 
 export { current, listing, picker, rawBill, sessions, settle } from '../bill-tools/harness.js';
 export const votePicker = 'https://www.ourcommons.ca/Members/en/votes';
@@ -93,23 +99,35 @@ export function ballots(
     respond: new Response(collection('ArrayOfVoteParticipant', 'VoteParticipant', rows)),
   });
 }
-/** Check actual CommonMark leaves for both the tool body and every enrichment value. */
-export function parity(
-  result: {
-    isError?: boolean | undefined;
-    structuredContent?: unknown;
-    content: readonly { type: string; text?: string }[];
-  },
-  definition: {
-    output: { parse(value: unknown): unknown };
-    format?: ((value: never) => readonly { type: string; text?: string }[]) | undefined;
-  },
-) {
+type ToolResult = {
+  isError?: boolean | undefined;
+  structuredContent?: unknown;
+  content: readonly { type: string; text?: string }[];
+};
+type Definition = {
+  enrichment?: Record<string, unknown>;
+  output: { parse(value: unknown): unknown };
+  format?: ((value: never) => readonly { type: string; text?: string }[]) | undefined;
+};
+/** Structurally decode the domain body from `content[0]` and from `format()`. */
+function domainParity(result: ToolResult, definition: Definition) {
   expect(result.isError).not.toBe(true);
   const data = result.structuredContent as Record<string, unknown>;
   const body = definition.output.parse(data);
   assertDomainParity(body, [result.content[0]!]);
   assertDomainParity(body, definition.format!(body as never));
+  return data;
+}
+/** Budgeted ballot page: domain parity, every enrichment field exact, measure equal to the wire. */
+export function ballotParity(result: ToolResult, definition: Definition) {
+  const data = domainParity(result, definition);
+  assertMeasuredResponse(result, definition, data.ballots as unknown[]);
+  return data;
+}
+/** Check actual CommonMark leaves for both the tool body and every enrichment value. */
+export function parity(result: ToolResult, definition: Definition) {
+  const data = domainParity(result, definition);
+  expectExact(trailerFields(result.content.slice(1)).appliedFilters, data.appliedFilters);
   const trailer = parseMarkdown(
     result.content
       .slice(1)
@@ -117,7 +135,6 @@ export function parity(
       .map((block) => block.text ?? '')
       .join('\n'),
   ).text;
-  expect(trailer).toContain(expectedText(data.appliedFilters, 'appliedFilters'));
   for (const key of ['shown', 'cap', 'truncated', 'tallyMatchesBallots'])
     if (key in data) expect(trailer).toContain(`${key}: ${String(data[key])}`);
   expect(trailer).toContain(`${String(data.totalCount)} total`);

@@ -70,9 +70,52 @@ describe('LegisinfoService network contract', () => {
     http.route({ match: listing, respond: Response.json([]) });
     expect((await settle(service.listBills('45-1', budget))).data).toEqual([]);
     await expect(service.listBills('46-1', budget)).rejects.toMatchObject({
-      data: { reason: 'unknown_session', retryable: false },
+      code: JsonRpcErrorCode.ValidationError,
+      message: 'session: Expected a session in the official bill session index: "45-1".',
+      data: { reason: 'unknown_session', retryable: false, field: 'session', allowed: ['45-1'] },
     });
     expect(http.calls.map((c) => c.request.url)).toEqual([picker, listing]);
+  });
+  it('names the session shape for a malformed token before any request', async () => {
+    const rejection = service.listBills('45-0', budget);
+    await expect(rejection).rejects.toMatchObject({
+      message: expect.stringMatching(/^session: Expected a parliament-session token such as 45-1/),
+      data: { reason: 'unknown_session', retryable: false, field: 'session' },
+    });
+    await expect(rejection).rejects.not.toHaveProperty('data.allowed');
+    expect(http.calls).toHaveLength(0);
+  });
+  it.each(['45-0', '0-1', '9007199254740992-1'])(
+    'resolves malformed session %j to the same field-named unknown_session before any request',
+    async (session) => {
+      const rejection = service.resolveSession(session, budget);
+      await expect(rejection).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringMatching(
+          /^session: Expected a parliament-session token such as 45-1/,
+        ),
+        data: { reason: 'unknown_session', retryable: false, field: 'session' },
+      });
+      await expect(rejection).rejects.not.toHaveProperty('data.allowed');
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+  it('resolves a supplied session without a request and an omitted one from the current feed', async () => {
+    expect(await service.resolveSession({ parliament: 37, session: 1 }, budget)).toEqual({
+      data: '37-1',
+      provenance: [],
+    });
+    http.route({ match: current, respond: Response.json([bill]) });
+    expect((await settle(service.resolveSession(undefined, budget))).data).toBe('45-1');
+    expect(http.calls.map((c) => c.request.url)).toEqual([current]);
+  });
+  it('lists a session whose rows include split-bill codes beside their base code', async () => {
+    sessions();
+    const rows = ['C-15', 'C-15A', 'C-15B'].map((NumberCode) => ({ ...bill, NumberCode }));
+    http.route({ match: listing, respond: Response.json(rows) });
+    expect(
+      (await settle(service.listBills('45-1', budget))).data.map((row) => row.billCode),
+    ).toEqual(['C-15', 'C-15A', 'C-15B']);
   });
   it.each([
     { rows: [bill, bill] },
@@ -123,11 +166,20 @@ describe('LegisinfoService network contract', () => {
     expect(http.calls).toHaveLength(3);
   });
   it.each(['C-0', 'C-1/../../secret', 'https://evil.test/C-1'])(
-    'rejects invalid bill code %s before any request',
+    'rejects invalid bill code %s as a field-named invalid_bill_code before any request',
     async (code) => {
-      await expect(service.getBill('45-1', code, budget)).rejects.toMatchObject({
-        data: { reason: 'invalid_bill_code', retryable: false },
+      const error = await service.getBill('45-1', code, budget).catch((e: unknown) => e);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringMatching(
+          /^billCode: Expected a House or Senate bill code such as C-15, C-15A, or S-1001/,
+        ),
+        data: { reason: 'invalid_bill_code', retryable: false, field: 'billCode' },
+        cause: expect.objectContaining({ code: JsonRpcErrorCode.ValidationError }),
       });
+      expect(error).not.toHaveProperty('data.allowed');
+      const { message, data } = error as { message: string; data: unknown };
+      expect(JSON.stringify([message, data])).not.toContain(code);
       expect(http.calls).toHaveLength(0);
     },
   );

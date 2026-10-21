@@ -8,7 +8,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assertDomainParity, expectedText, parseMarkdown } from '../fixtures/bill-tools/harness.js';
+import {
+  assertDomainParity,
+  expectExact,
+  parseMarkdown,
+  trailerFields,
+} from '../fixtures/bill-tools/harness.js';
 
 interface ToolResult {
   content: { type: string; text?: string }[];
@@ -47,13 +52,13 @@ describe('actual parliament application over stdio', () => {
       const { appliedFilters, totalCount, shown, cap, truncated, notice, ...body } =
         result.structuredContent;
       assertDomainParity(body, [result.content[0]!]);
+      expectExact(trailerFields(result.content.slice(1)).appliedFilters, appliedFilters);
       const trailer = parseMarkdown(
         result.content
           .slice(1)
           .map((block) => block.text ?? '')
           .join('\n'),
       ).text;
-      expect(trailer).toContain(expectedText(appliedFilters, 'appliedFilters'));
       if (totalCount !== undefined) expect(trailer).toContain(`${String(totalCount)} total`);
       for (const [key, value] of Object.entries({ shown, cap, truncated }))
         if (value !== undefined) expect(trailer).toContain(`${key}: ${String(value)}`);
@@ -177,6 +182,36 @@ describe('actual parliament application over stdio', () => {
         };
         inspect(schema);
       }
+    }
+    interface SchemaNode {
+      $defs: Record<string, SchemaNode>;
+      anyOf: SchemaNode[];
+      items: SchemaNode;
+      properties: Record<string, SchemaNode>;
+    }
+    const outputOf = (name: string) =>
+      listing.tools.find((tool) => tool.name === name)!.outputSchema as unknown as SchemaNode;
+    const billSchema = outputOf('canparl_get_bill');
+    expect(billSchema.$defs.BillStage).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+    });
+    for (const key of ['house', 'senate', 'royalAssent'])
+      expect(billSchema.properties.stages!.properties[key]!.anyOf[0]!.items).toEqual({
+        $ref: '#/$defs/BillStage',
+      });
+    expect(JSON.stringify(billSchema).match(/"Complete official stage;/g)).toHaveLength(1);
+    for (const summary of [
+      billSchema.properties.bill!,
+      outputOf('canparl_search_bills').properties.bills!.items,
+    ]) {
+      expect(summary.properties.latestMajorStage!.anyOf[0]!.properties.chamber).toEqual({
+        anyOf: [{ type: 'string', enum: ['House', 'Senate'] }, { type: 'null' }],
+        description: expect.stringContaining('royal assent is reported as Senate'),
+      });
+      expect(summary.properties.royalAssentDate).toMatchObject({
+        description: expect.stringContaining('UTC instant ending in Z'),
+      });
     }
     const reference = await call('canparl_list_reference', { topic: 'sessions' });
     expect(reference.isError).not.toBe(true);

@@ -6,15 +6,21 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import { getServerConfig, type ServerConfig } from '../../config/server-config.js';
-import { normalizeSession } from '../../domain/normalization.js';
-import type { RequestContext } from '../../domain/request-context.js';
-import type { Source } from '../../domain/schemas.js';
-import { parseMembers, parseVoteParticipants, parseVoteSessions, parseVotes } from './parsing.js';
+import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
+import { rejectFilter, rejectSession } from '@/domain/normalization.js';
+import type { RequestContext } from '@/domain/request-context.js';
+import type { Source, SourceResult } from '@/domain/schemas.js';
+import {
+  parseMembers,
+  parseMemberVotes,
+  parseVoteParticipants,
+  parseVoteSessions,
+  parseVotes,
+} from './parsing.js';
 import type {
   Division,
+  MemberVote,
   OurCommonsMember,
-  SourceResult,
   VoteParticipant,
   VoteSession,
 } from './types.js';
@@ -51,7 +57,8 @@ export class OurCommonsService {
         provenance: [{ ...cached.source, cached: true }],
       };
     if (cached) this.cache.delete(url);
-    const deadlineAt = Date.now() + Math.min(20_000, request.remainingMs());
+    const deadlineMs = Math.min(20_000, request.remainingMs());
+    const deadlineAt = Date.now() + deadlineMs;
     const result = await withRetry(
       (attempt) =>
         this.pacer.run(
@@ -95,7 +102,7 @@ export class OurCommonsService {
         maxRetries: 2,
         baseDelayMs: 1000,
         maxDelayMs: 5000,
-        deadlineMs: Math.min(20_000, request.remainingMs()),
+        deadlineMs,
       },
     ).catch((error: unknown) => {
       request.throwIfAborted();
@@ -123,20 +130,27 @@ export class OurCommonsService {
   listMembers(request: RequestContext): Promise<SourceResult<OurCommonsMember[]>> {
     return this.load('/Members/en/search/xml', parseMembers, request);
   }
-  private async verifySession(session: string, request: RequestContext): Promise<Source[]> {
-    const canonical = normalizeSession(session);
-    if (canonical !== session)
-      throw validationError('Expected a canonical parliamentary session.', {
-        reason: 'unsupported_vote_session',
-        retryable: false,
-      });
+  /** Verify a session against the divisions picker; a rejection names the caller's `field`. */
+  private async verifySession(
+    session: string,
+    request: RequestContext,
+    field = 'session',
+  ): Promise<Source[]> {
+    const failure = { reason: 'unsupported_vote_session', retryable: false };
+    if (!/^[1-9]\d*-[1-9]\d*$/.test(session))
+      throw rejectFilter(
+        field,
+        'Expected a canonical parliament-session token such as 45-1.',
+        failure,
+      );
     const sessions = await this.getVoteSessions(request);
     if (!sessions.data.some((entry) => entry.session === session))
-      throw validationError('Session is not advertised by the official House divisions index.', {
-        reason: 'unsupported_vote_session',
-        retryable: false,
-        session,
-      });
+      throw rejectSession(
+        field,
+        'official House division',
+        sessions.data.map((entry) => entry.session),
+        failure,
+      );
     return sessions.provenance;
   }
   /** Obtain complete session metadata; caller owns filtering and pagination. */
@@ -184,6 +198,30 @@ export class OurCommonsService {
         });
       throw error;
     }
+  }
+  /**
+   * Obtain one member's recorded ballots in a session in one request. A supplied session is
+   * verified against the divisions picker, its rejection naming `votesSession`, the
+   * `canparl_get_member` input that carries it; without one the feed answers with the member's
+   * latest session. An empty feed cannot tell a session the member did not sit in from an unknown
+   * person ID.
+   */
+  async listMemberVotes(
+    personId: string,
+    session: string | undefined,
+    request: RequestContext,
+  ): Promise<SourceResult<MemberVote[]>> {
+    if (!/^[1-9]\d*$/.test(personId))
+      throw validationError('Person ID must be a positive decimal integer.');
+    const provenance =
+      session === undefined ? [] : await this.verifySession(session, request, 'votesSession');
+    const query = session === undefined ? '' : `?parlSession=${encodeURIComponent(session)}`;
+    const result = await this.load(
+      `/Members/en/${personId}/votes/xml${query}`,
+      (text) => parseMemberVotes(text, personId, session),
+      request,
+    );
+    return { data: result.data, provenance: [...provenance, ...result.provenance] };
   }
   /** Release queued work and cached data at shutdown. */
   dispose(): void {

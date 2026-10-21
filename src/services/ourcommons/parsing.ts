@@ -2,8 +2,15 @@
 import { serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { XMLParser } from 'fast-xml-parser';
 import { parseHTML } from 'linkedom';
-import { assertRepresentableText } from '../../domain/normalization.js';
-import type { Division, OurCommonsMember, VoteParticipant, VoteSession } from './types.js';
+import { assertRepresentableText } from '@/domain/normalization.js';
+import type {
+  Division,
+  MemberVote,
+  OurCommonsMember,
+  RecordedBallot,
+  VoteParticipant,
+  VoteSession,
+} from './types.js';
 
 type RecordValue = Record<string, unknown>;
 const parser = new XMLParser({
@@ -117,13 +124,39 @@ function person(row: RecordValue) {
     url: `https://www.ourcommons.ca/Members/en/${personId}`,
   };
 }
+function rowSession(row: RecordValue): string {
+  return `${positive(row, 'ParliamentNumber')}-${positive(row, 'SessionNumber')}`;
+}
 function identity(row: RecordValue, session: string): void {
-  if (`${positive(row, 'ParliamentNumber')}-${positive(row, 'SessionNumber')}` !== session)
-    malformed('session identity');
+  if (rowSession(row) !== session) malformed('session identity');
 }
 function unique<T>(rows: T[], key: (row: T) => string): T[] {
   if (new Set(rows.map(key)).size !== rows.length) malformed('duplicate identity');
   return rows;
+}
+function billCode(row: RecordValue): string | null {
+  const code = text(row, 'BillNumberCode');
+  if (code && !/^[CS]-[1-9]\d*[A-Z]?$/.test(code)) malformed('BillNumberCode');
+  return code || null;
+}
+function divisionUrl(session: string, number: number): string {
+  return `https://www.ourcommons.ca/Members/en/votes/${session.replace('-', '/')}/${number}`;
+}
+/** Recorded ballot whose `IsVote*` flags, when present, agree with it. */
+function recordedBallot(row: RecordValue): RecordedBallot {
+  const ballot = required(row, 'VoteValueName');
+  if (ballot !== 'Yea' && ballot !== 'Nay' && ballot !== 'Paired')
+    return malformed('VoteValueName');
+  for (const value of ['Yea', 'Nay', 'Paired']) {
+    const flag = text(row, `IsVote${value}`);
+    if (flag === null) continue;
+    if (
+      !['true', 'false', '1', '0'].includes(flag) ||
+      ['true', '1'].includes(flag) !== (ballot === value)
+    )
+      malformed(`IsVote${value}`);
+  }
+  return ballot;
 }
 /** Parse the real HTML session picker without executing page scripts. */
 export function parseVoteSessions(html: string): VoteSession[] {
@@ -177,8 +210,6 @@ export function parseVotes(xml: string, session: string): Division[] {
     records(xml, 'ArrayOfVote', 'Vote').map((row) => {
       identity(row, session);
       const number = positive(row, 'DecisionDivisionNumber');
-      const billCode = text(row, 'BillNumberCode');
-      if (billCode && !/^[CS]-[1-9]\d*$/.test(billCode)) malformed('BillNumberCode');
       return {
         session,
         number,
@@ -189,8 +220,8 @@ export function parseVotes(xml: string, session: string): Division[] {
         nays: integer(row, 'DecisionDivisionNumberOfNays', true),
         paired: integer(row, 'DecisionDivisionNumberOfPaired', true),
         documentType: text(row, 'DecisionDivisionDocumentTypeName'),
-        billCode: billCode === '' ? null : billCode,
-        url: `https://www.ourcommons.ca/Members/en/votes/${session.replace('-', '/')}/${number}`,
+        billCode: billCode(row),
+        url: divisionUrl(session, number),
       };
     }),
     (row) => String(row.number),
@@ -206,20 +237,39 @@ export function parseVoteParticipants(
     records(xml, 'ArrayOfVoteParticipant', 'VoteParticipant').map((row) => {
       identity(row, session);
       if (positive(row, 'DecisionDivisionNumber') !== number) malformed('division identity');
-      const ballot = required(row, 'VoteValueName');
-      if (ballot !== 'Yea' && ballot !== 'Nay' && ballot !== 'Paired')
-        return malformed('VoteValueName');
-      for (const value of ['Yea', 'Nay', 'Paired']) {
-        const flag = text(row, `IsVote${value}`);
-        if (flag === null) continue;
-        if (
-          !['true', 'false', '1', '0'].includes(flag) ||
-          ['true', '1'].includes(flag) !== (ballot === value)
-        )
-          malformed(`IsVote${value}`);
-      }
-      return { ...person(row), ballot };
+      return { ...person(row), ballot: recordedBallot(row) };
     }),
     (row) => row.personId,
+  );
+}
+/**
+ * Parse one member's recorded ballots: every row is that person's, all rows share one session (the
+ * requested one when given; otherwise the member's latest, which the feed chooses), each division
+ * appears once, and date-times are source `YYYY-MM-DDTHH:MM:SS` text.
+ */
+export function parseMemberVotes(xml: string, personId: string, session?: string): MemberVote[] {
+  let feedSession = session;
+  return unique(
+    records(xml, 'ArrayOfMemberVote', 'MemberVote').map((row) => {
+      if (String(positive(row, 'PersonId')) !== personId) malformed('person identity');
+      const current = rowSession(row);
+      feedSession ??= current;
+      if (current !== feedSession) malformed('session identity');
+      const number = positive(row, 'DecisionDivisionNumber');
+      const dateTime = text(row, 'DecisionEventDateTime');
+      if (dateTime !== null && !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(dateTime))
+        malformed('DecisionEventDateTime');
+      return {
+        session: current,
+        number,
+        dateTime,
+        subject: text(row, 'DecisionDivisionSubject'),
+        result: text(row, 'DecisionResultName'),
+        billCode: billCode(row),
+        ballot: recordedBallot(row),
+        url: divisionUrl(current, number),
+      };
+    }),
+    (row) => String(row.number),
   );
 }

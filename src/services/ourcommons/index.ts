@@ -7,8 +7,9 @@ export {
 } from './ourcommons-service.js';
 export type {
   Division,
+  MemberVote,
   OurCommonsMember,
-  SourceResult,
+  RecordedBallot,
   VoteParticipant,
   VoteSession,
 } from './types.js';

@@ -4,9 +4,15 @@
  */
 import { notFound, serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { parseHTML } from 'linkedom';
+import { htmlToText } from '@/domain/html-to-text.js';
 import { assertRepresentableText } from '@/domain/normalization.js';
-import { type JsonRecord, JsonRecordSchema, type JsonValue } from '@/domain/schemas.js';
-import type { BilingualText, BillDossier, BillSummary, LegisinfoSession, Stage } from './types.js';
+import {
+  type BilingualText,
+  type JsonRecord,
+  JsonRecordSchema,
+  type JsonValue,
+} from '@/domain/schemas.js';
+import type { BillDossier, BillSummary, Chamber, LegisinfoSession, Stage } from './types.js';
 
 /** Deterministic malformed-source failure; retries cannot repair schema drift. */
 export function invalidResponse(): never {
@@ -35,17 +41,27 @@ function text(value: JsonValue | undefined): string | null {
   if (typeof value !== 'string') invalidResponse();
   return value.trim() ? value : null;
 }
-function integer(value: JsonValue | undefined, required = false, positive = false): number | null {
-  if (value == null && !required) return null;
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || (positive && value <= 0))
-    invalidResponse();
+function integer(value: JsonValue | undefined): number | null {
+  if (value == null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) invalidResponse();
   return value;
 }
 function requiredInteger(value: JsonValue | undefined): number {
-  return integer(value, true, true) as number;
+  const result = integer(value);
+  if (result === null || result <= 0) invalidResponse();
+  return result;
 }
 function bilingual(row: JsonRecord, prefix: string): BilingualText {
   return { en: text(row[`${prefix}En`]), fr: text(row[`${prefix}Fr`]) };
+}
+/** Dossier HTML as plain text with link targets kept; markup without text is unavailable. */
+function bilingualHtml(row: JsonRecord, prefix: string): BilingualText {
+  const plain = (html: string | null) => {
+    const result = html === null ? null : htmlToText(html, { linkTargets: true });
+    return result?.trim() ? result : null;
+  };
+  const { en, fr } = bilingual(row, prefix);
+  return { en: plain(en), fr: plain(fr) };
 }
 function records(value: JsonValue | undefined): JsonRecord[] | null {
   if (value == null) return null;
@@ -63,6 +79,28 @@ function bool(value: JsonValue | undefined): boolean | null {
   if (value == null) return null;
   if (typeof value !== 'boolean') invalidResponse();
   return value;
+}
+/** Which official feed a row came from; their date-time conventions differ. */
+type Feed = 'list' | 'dossier';
+const DATE_TIME =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|([+-])([01]\d|2[0-3]):([0-5]\d))?$/;
+/**
+ * Express an official date-time as `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, keeping fraction digits as
+ * published. Offset-bearing values convert; an offset-less clock is UTC in the dossier feed, while
+ * the list feed never states its zone. Any other value is relayed as published.
+ */
+function utcInstant(value: string | null, feed: Feed): string | null {
+  const match = value === null ? null : DATE_TIME.exec(value);
+  if (!match || (match[3] === undefined && feed === 'list')) return value;
+  const [, clock = '', fraction = '', , sign, hours = '0', minutes = '0'] = match;
+  const local = Date.parse(`${clock}Z`);
+  if (Number.isNaN(local) || new Date(local).toISOString().slice(0, 19) !== clock) return value;
+  const offset = (sign === '-' ? -1 : 1) * (Number(hours) * 60 + Number(minutes)) * 60_000;
+  return `${new Date(local - offset).toISOString().slice(0, 19)}${fraction}Z`;
+}
+/** A dossier reading date-time in the same UTC representation as royal assent. */
+function reading(value: JsonValue | undefined): string | null {
+  return utcInstant(text(value), 'dossier');
 }
 /** Parse a complete official JSON array; HTML outages remain transient. */
 export function parseBillRecords(body: string): JsonRecord[] {
@@ -82,7 +120,7 @@ export function billIdentity(row: JsonRecord): { session: string; billCode: stri
   const parliament = requiredInteger(row.ParliamentNumber);
   const session = requiredInteger(row.SessionNumber);
   const billCode = text(row.NumberCode);
-  if (!billCode || !/^[CS]-[1-9]\d*$/.test(billCode)) invalidResponse();
+  if (!billCode || !/^[CS]-[1-9]\d*[A-Z]?$/.test(billCode)) invalidResponse();
   return { session: `${parliament}-${session}`, billCode };
 }
 /** Parse actual picker options, excluding the all-sessions choice. */
@@ -117,54 +155,58 @@ export function parseSessions(body: string): LegisinfoSession[] {
 }
 /** Require the default feed to identify exactly one ongoing session. */
 export function parseCurrentSession(rows: JsonRecord[]): string {
-  if (!rows.length) invalidResponse();
-  const sessions = new Set(
+  const [session, ...others] = new Set(
     rows.map((row) => {
       const identity = billIdentity(row);
       if (row.IsSessionOngoing !== true) invalidResponse();
       return identity.session;
     }),
   );
-  if (sessions.size !== 1) invalidResponse();
-  return [...sessions][0] as string;
+  if (session === undefined || others.length) invalidResponse();
+  return session;
 }
-/** Normalize a list row without substituting the latest minor event. */
-export function parseBillSummary(row: JsonRecord): BillSummary {
+/**
+ * Reconcile `<prefix>NameEn` (`House of Commons`, `House`, `Senate`), `<prefix>OrganizationId`
+ * (1 House, 2 Senate), and any positive chamber flags into one chamber. Disagreeing evidence, an
+ * unknown value, or a false flag for the identified chamber is an invalid record; no evidence is
+ * null.
+ */
+function reconcileChamber(
+  row: JsonRecord,
+  prefix: string,
+  flags: Record<Chamber, boolean | null> = { House: null, Senate: null },
+): Chamber | null {
+  const name = text(row[`${prefix}NameEn`]);
+  if (name !== null && !['House of Commons', 'House', 'Senate'].includes(name)) invalidResponse();
+  const organization = integer(row[`${prefix}OrganizationId`]);
+  if (organization !== null && organization !== 1 && organization !== 2) invalidResponse();
+  const evidence = new Set<Chamber>();
+  if (name !== null) evidence.add(name === 'Senate' ? 'Senate' : 'House');
+  if (organization !== null) evidence.add(organization === 1 ? 'House' : 'Senate');
+  for (const chamber of ['House', 'Senate'] as const)
+    if (flags[chamber] === true) evidence.add(chamber);
+  if (evidence.size > 1) invalidResponse();
+  const [chamber = null] = evidence;
+  if (chamber !== null && flags[chamber] === false) invalidResponse();
+  return chamber;
+}
+/** Normalize a list or dossier row's summary without substituting the latest minor event. */
+export function parseBillSummary(row: JsonRecord, feed: Feed = 'list'): BillSummary {
   const identity = billIdentity(row);
   const name = text(row.LatestCompletedMajorStageNameEn);
-  const chamber = text(row.LatestCompletedMajorStageChamberNameEn);
-  const origin = text(row.OriginatingChamberNameEn);
-  if (origin !== null && !['House of Commons', 'House', 'Senate'].includes(origin))
-    invalidResponse();
-  const organization = integer(row.OriginatingChamberOrganizationId);
-  if (organization !== null && organization !== 1 && organization !== 2) invalidResponse();
-  const house = bool(row.IsHouseBill);
-  const senate = bool(row.IsSenateBill);
-  const evidence = (
-    [
-      origin === null ? null : origin === 'Senate' ? 'Senate' : 'House',
-      organization === null ? null : organization === 1 ? 'House' : 'Senate',
-      house === true ? 'House' : null,
-      senate === true ? 'Senate' : null,
-    ] satisfies BillSummary['originatingChamber'][]
-  ).filter((value) => value !== null);
-  const identities = new Set(evidence);
-  if (identities.size > 1) invalidResponse();
-  const originatingChamber = evidence[0] ?? null;
-  if (
-    (originatingChamber === 'House' && house === false) ||
-    (originatingChamber === 'Senate' && senate === false)
-  )
-    invalidResponse();
+  const chamber = reconcileChamber(row, 'LatestCompletedMajorStageChamber');
   return {
     ...identity,
     longTitle: bilingual(row, 'LongTitle'),
     shortTitle: bilingual(row, 'ShortTitle'),
     billType: text(row.BillDocumentTypeNameEn),
-    originatingChamber,
+    originatingChamber: reconcileChamber(row, 'OriginatingChamber', {
+      House: bool(row.IsHouseBill),
+      Senate: bool(row.IsSenateBill),
+    }),
     status: text(row.StatusNameEn),
     latestMajorStage: name === null && chamber === null ? null : { name, chamber },
-    royalAssentDate: text(row.ReceivedRoyalAssentDateTime),
+    royalAssentDate: utcInstant(text(row.ReceivedRoyalAssentDateTime), feed),
     url: `https://www.parl.ca/legisinfo/en/bill/${identity.session}/${identity.billCode.toLowerCase()}`,
   };
 }
@@ -214,39 +256,31 @@ export function parseBillDossier(
     const identity = billIdentity(row);
     return identity.session === session && identity.billCode === billCode;
   });
-  if (!matching.length)
+  const [row] = matching;
+  if (!row)
     throw notFound('The official bill dossier was not found.', {
       reason: 'bill_not_found',
       retryable: false,
     });
   if (matching.length !== 1 || rows.length !== 1) invalidResponse();
-  const row = matching[0];
-  if (!row) invalidResponse();
   const stages = row.BillStages == null ? null : record(row.BillStages);
   const year = integer(row.StatuteYear);
   const chapter = scalar(row.StatuteChapter);
   const personId =
     row.SponsorPersonId == null ? null : String(requiredInteger(row.SponsorPersonId));
   return {
-    bill: parseBillSummary(row),
+    bill: parseBillSummary(row, 'dossier'),
     sponsor: {
       name: text(row.SponsorPersonName),
       personId,
       riding: text(row.SponsorConstituencyNameEn),
+      title: bilingual(row, 'SponsorAffiliationTitle'),
     },
     stages: {
-      house:
-        stages === null
-          ? null
-          : (records(stages.HouseBillStages)?.map((stage) => parseStage(stage, 'House')) ?? null),
+      house: records(stages?.HouseBillStages)?.map((stage) => parseStage(stage, 'House')) ?? null,
       senate:
-        stages === null
-          ? null
-          : (records(stages.SenateBillStages)?.map((stage) => parseStage(stage, 'Senate')) ?? null),
-      royalAssent:
-        stages === null
-          ? null
-          : (records(stages.RoyalAssent)?.map((stage) => parseStage(stage, null)) ?? null),
+        records(stages?.SenateBillStages)?.map((stage) => parseStage(stage, 'Senate')) ?? null,
+      royalAssent: records(stages?.RoyalAssent)?.map((stage) => parseStage(stage, null)) ?? null,
     },
     divisions:
       records(row.HouseVoteDetails)?.map((division) => {
@@ -279,5 +313,22 @@ export function parseBillDossier(
       year !== null && chapter !== null
         ? { year, chapter, citation: `S.C. ${year}, c. ${chapter}` }
         : null,
+    summary: bilingualHtml(row, 'ShortLegislativeSummary'),
+    notes: bilingualHtml(row, 'Notes'),
+    milestones: {
+      houseFirstReading: reading(row.PassedHouseFirstReadingDateTime),
+      houseSecondReading: reading(row.PassedHouseSecondReadingDateTime),
+      houseThirdReading: reading(row.PassedHouseThirdReadingDateTime),
+      senateFirstReading: reading(row.PassedSenateFirstReadingDateTime),
+      senateSecondReading: reading(row.PassedSenateSecondReadingDateTime),
+      senateThirdReading: reading(row.PassedSenateThirdReadingDateTime),
+    },
+    webReferences:
+      records(row.WebReferences)?.map((reference) => ({
+        title: bilingual(reference, 'Title'),
+        typeId: integer(reference.WebReferenceTypeId),
+        type: bilingual(reference, 'WebReferenceTypeName'),
+        url: bilingual(reference, 'Url'),
+      })) ?? null,
   };
 }

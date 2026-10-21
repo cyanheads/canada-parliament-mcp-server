@@ -5,7 +5,7 @@ import {
   disposeOpenParliamentService,
   initOpenParliamentService,
 } from '@/services/openparliament/index.js';
-import { assertDomainParity, expectedText, parseMarkdown } from '../bill-tools/harness.js';
+import { assertDomainParity, assertMeasuredResponse } from '../bill-tools/harness.js';
 
 export { settle } from '../bill-tools/harness.js';
 export const api = 'https://api.openparliament.ca';
@@ -109,6 +109,7 @@ export function parity(
     content: readonly { type: string; text?: string }[];
   },
   definition: {
+    enrichment?: Record<string, unknown>;
     output: { parse(value: unknown): unknown };
     format?: ((value: never) => readonly { type: string; text?: string }[]) | undefined;
   },
@@ -118,17 +119,8 @@ export function parity(
   const body = definition.output.parse(data);
   assertDomainParity(body, [result.content[0]!]);
   assertDomainParity(body, definition.format!(body as never));
-  const trailer = parseMarkdown(
-    result.content
-      .slice(1)
-      .map((block) => block.text ?? '')
-      .join('\n'),
-  ).text;
-  expect(trailer).toContain(expectedText(data.appliedFilters, 'appliedFilters'));
-  for (const key of ['shown', 'cap', 'truncated', 'excludedCommittees'])
-    expect(trailer).toContain(`${key}: ${String(data[key])}`);
   expect(data.notice).toEqual(expect.any(String));
-  expect(trailer).toContain(data.notice);
+  assertMeasuredResponse(result, definition, data.speeches as unknown[]);
   return data;
 }
 /** Assert only declared error metadata, preserving omitted retryability. */

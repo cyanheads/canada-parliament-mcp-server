@@ -1,4 +1,5 @@
 /** @fileoverview Synthetic member HTTP boundary and lossless rendering oracle. @module tests/fixtures/member-tools/harness */
+import { readFileSync } from 'node:fs';
 import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { expect, vi } from 'vitest';
 import {
@@ -6,12 +7,33 @@ import {
   initOpenParliamentService,
 } from '@/services/openparliament/index.js';
 import { disposeOurCommonsService, initOurCommonsService } from '@/services/ourcommons/index.js';
-import { expectedText, parseMarkdown } from '../bill-tools/harness.js';
+import { parseMarkdown, trailerFields } from '../bill-tools/harness.js';
+import { decodeBun, expectExact } from '../markdown-decode.js';
 
 export { settle } from '../bill-tools/harness.js';
-export { collection, failure, rawPerson, rosterUrl } from '../vote-tools/harness.js';
+export { collection, failure, rawPerson, rosterUrl, votePicker } from '../vote-tools/harness.js';
 export const origin = 'https://api.openparliament.ca';
 export const actor = '/politicians/river-example/';
+/**
+ * Captured OpenParliament `/politicians/lawrence-cannon/` body (2026-10-21), verbatim except the
+ * office contact fields (`email`, `voice`, `fax`, `other_info.constituency_offices`), which the
+ * profile parser never reads. Its one link is `http://`.
+ */
+export const lawrenceCannon = (): Record<string, unknown> =>
+  JSON.parse(readFileSync(new URL('./lawrence-cannon.json', import.meta.url), 'utf8'));
+/**
+ * Captured OurCommons `/Members/en/{personId}/votes/xml` bodies (2026-10-21). Rows are verbatim and
+ * in feed order; each file keeps a subset: `2897-45-1` divisions 169–179, every C-15 division, and
+ * the date-time inversions 159/158, 147/146, 131/130; `2897-44-1`, `35933-latest` (the request
+ * without `parlSession`, 41-2), and `88721-45-1` (divisions 54–52, 53 Paired) keep three rows;
+ * `empty` is the whole body for a session the member did not sit in.
+ */
+export const realMemberVotes = (
+  name: '2897-45-1' | '2897-44-1' | '35933-latest' | '88721-45-1' | 'empty',
+): string => readFileSync(new URL(`./member-votes/${name}.xml`, import.meta.url), 'utf8');
+/** Official member-votes feed URL, with `parlSession` only when a session is supplied. */
+export const memberVotesUrl = (personId: string, session?: string) =>
+  `https://www.ourcommons.ca/Members/en/${personId}/votes/xml${session ? `?parlSession=${session}` : ''}`;
 export function setup() {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-20T00:00:00Z'));
@@ -99,52 +121,50 @@ export function parity(
   definition: {
     output: { parse(value: unknown): unknown };
     format?: ((value: never) => readonly { type: string; text?: string }[]) | undefined;
+    enrichmentTrailer?: Record<string, { render?: unknown } | undefined> | undefined;
   },
 ) {
   expect(result.isError).not.toBe(true);
   const data = result.structuredContent as Record<string, unknown>;
   const body = definition.output.parse(data);
   const check = (blocks: readonly { type: string; text?: string }[]) => {
-    const parsed = parseMarkdown(
+    const decoded = decodeBun(
       blocks
         .filter((b) => b.type === 'text')
         .map((b) => b.text ?? '')
         .join('\n'),
     );
+    expectExact(decoded.value, body);
     const links: { text: string; href: string }[] = [];
     const images: { text: string; src: string }[] = [];
-    const expected = (node: unknown, key = 'value'): string => {
-      if (Array.isArray(node))
-        return `${key}: ${node.length ? '[array]' : '[]'}${node.map((v, i) => expected(v, String(i))).join('')}`;
-      if (node !== null && typeof node === 'object')
-        return `${key}: ${Object.keys(node).length ? '[object]' : '{}'}${Object.entries(node)
-          .map(([k, v]) => expected(v, k))
-          .join('')}`;
-      if (typeof node === 'string' && node.startsWith('https://')) {
-        if (/image|photo|portrait/i.test(key)) {
-          images.push({ text: 'imageUrl', src: node });
-          return `${key}: imageUrl`;
-        }
-        links.push({ text: node, href: node });
+    const walk = (node: unknown, key: string): void => {
+      if (Array.isArray(node)) for (const [i, v] of node.entries()) walk(v, String(i));
+      else if (node !== null && typeof node === 'object')
+        for (const [k, v] of Object.entries(node)) walk(v, k);
+      else if (typeof node === 'string' && node.startsWith('https://')) {
+        if (/image|photo|portrait/i.test(key)) images.push({ text: 'imageUrl', src: node });
+        else links.push({ text: node, href: node });
       }
-      return `${key}:${node === '' ? '' : ` ${String(node)}`}`;
     };
-    expect(parsed.text).toBe(expected(body));
-    expect(parsed.links).toEqual(links);
-    expect(parsed.images).toEqual(images);
+    walk(body, 'value');
+    expect(decoded.links).toEqual(links);
+    expect(decoded.images).toEqual(images);
   };
   check([result.content[0]!]);
   check(definition.format!(body as never));
-  const trailer = parseMarkdown(
-    result.content
-      .slice(1)
-      .map((b) => b.text ?? '')
-      .join('\n'),
-  ).text;
+  const trailer = result.content.slice(1);
+  const fields = trailerFields(trailer);
+  const lines = trailer.flatMap((b) => (b.text ?? '').split('\n'));
   for (const key of ['appliedFilters', 'shown', 'cap', 'truncated', 'unavailable']) {
     if (key !== 'unavailable') expect(data).toHaveProperty(key);
-    if (key in data) expect(trailer).toContain(expectedText(data[key], key));
+    if (!(key in data)) continue;
+    // Fields the tool renders itself decode structurally; the rest are the framework's whole `**key:** value` line.
+    if (definition.enrichmentTrailer?.[key]?.render) expectExact(fields[key], data[key]);
+    else expect(lines).toContain(`**${key}:** ${String(data[key])}`);
   }
-  if (data.notice) expect(trailer).toContain(data.notice);
+  if (data.notice) {
+    expect(lines).toContain(`> ${data.notice}`);
+    expect(parseMarkdown(`> ${data.notice}`).text).toBe(data.notice);
+  }
   return data;
 }

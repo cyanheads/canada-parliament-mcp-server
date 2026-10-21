@@ -2,7 +2,10 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { PROVINCES } from '@/domain/normalization.js';
+import { PARTIES } from '@/domain/reference-catalog.js';
 import { searchMembersTool } from '@/mcp-server/tools/definitions/search-members.tool.js';
+import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
 import {
   collection,
   failure,
@@ -106,7 +109,65 @@ describe('canparl_search_members production contract', () => {
       cap: 100,
       truncated: false,
     });
+    expect(data).not.toHaveProperty('notice');
   });
+  it.each([150, 10_000])('clamps current-roster limit %i to the 100-row cap', async (limit) => {
+    http.route({
+      match: rosterUrl,
+      respond: new Response(
+        collection(
+          'ArrayOfMemberOfParliament',
+          'MemberOfParliament',
+          Array.from({ length: 150 }, (_, i) =>
+            rawPerson(i + 1, { PersonOfficialLastName: `Surname${String(i).padStart(3, '0')}` }),
+          ),
+        ),
+      ),
+    });
+    const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
+    const first = parity(await call({ limit }), searchMembersTool);
+    expect(first).toMatchObject({
+      total: 150,
+      shown: 100,
+      cap: 100,
+      truncated: true,
+      pagination: { offset: 0, limit: 100, nextOffset: 100, hasMore: true },
+      notice,
+    });
+    const rest = parity(await call({ limit, offset: 100 }), searchMembersTool);
+    expect(rest).toMatchObject({
+      shown: 50,
+      cap: 100,
+      pagination: { offset: 100, limit: 100, nextOffset: null, hasMore: false },
+      notice,
+    });
+    expect((rest.members as { personId: string }[]).at(-1)?.personId).toBe('150');
+  });
+  it.each([150, 10_000])(
+    'requests a historical page of 100 for limit %i and discloses the clamp',
+    async (limit) => {
+      const url = page(
+        http,
+        '/politicians/',
+        { limit: 100, offset: 0, include: 'all', family_name: 'Example' },
+        [{ name: 'River Example', url: '/politicians/river-example/' }],
+        100,
+      );
+      const data = parity(
+        await call({ includeFormer: true, name: 'Example', limit }),
+        searchMembersTool,
+      );
+      expect(http.calls.map((c) => c.request.url)).toEqual([url]);
+      expect(data).toMatchObject({
+        total: null,
+        shown: 1,
+        cap: 100,
+        truncated: true,
+        pagination: { offset: 0, limit: 100, nextOffset: 100, hasMore: true },
+        notice: `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`,
+      });
+    },
+  );
   it('does not infer historical continuation from a full page', async () => {
     page(http, '/politicians/', { limit: 1, offset: 0, include: 'all' }, [
       { name: 'River Example', url: '/politicians/river-example/' },
@@ -128,13 +189,20 @@ describe('canparl_search_members production contract', () => {
       pagination: { nextOffset: null, hasMore: false },
     });
   });
-  it.each([{ province: 'PQ' }, { province: 'Atlantis' }, { party: 'Imaginary' }])(
-    'returns declared current-filter recovery %j',
-    async (input) => {
-      roster();
-      failure(await call(input), searchMembersTool.errors![1]!);
-    },
-  );
+  const provinces = [...Object.values(PROVINCES), ...Object.keys(PROVINCES)];
+  it.each<[Record<string, string>, FilterRejection]>([
+    [{ province: 'PQ' }, { field: 'province', rejected: 'PQ', allowed: provinces }],
+    [{ province: 'Atlantis' }, { field: 'province', rejected: 'Atlantis', allowed: provinces }],
+    [
+      { party: 'Imaginary' },
+      { field: 'party', rejected: 'Imaginary', allowed: [...PARTIES, 'Bloc', 'Green'] },
+    ],
+  ])('returns declared current-filter recovery %j', async (input, expected) => {
+    roster();
+    const result = await call(input);
+    failure(result, searchMembersTool.errors![1]!);
+    assertFilterRejection(result, expected);
+  });
   it.each(['riding', 'province', 'party'])('rejects historical %s before network', async (key) => {
     failure(await call({ includeFormer: true, [key]: 'Ontario' }), searchMembersTool.errors![0]!);
     expect(http.calls).toHaveLength(0);
@@ -190,7 +258,7 @@ describe('canparl_search_members production contract', () => {
       notice: expect.stringContaining(offset ? 'offset 0' : 'surname alone'),
     });
   });
-  it.each([{ limit: 0 }, { limit: 101 }, { offset: -1 }])(
+  it.each([{ limit: 0 }, { limit: 10_001 }, { offset: -1 }])(
     'rejects invalid schema %j without network',
     async (input) => {
       expect((await call(input)).structuredContent).toMatchObject({

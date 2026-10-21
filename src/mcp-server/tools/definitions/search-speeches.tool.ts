@@ -5,18 +5,24 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
+  clampCount,
+  filterFailure,
   includesText,
   normalizeBillCode,
   normalizeDate,
+  normalizeFilter,
   normalizeSession,
   normalizeSlug,
+  rejectFilter,
   validateDateRange,
 } from '@/domain/normalization.js';
 import { createRequestContext } from '@/domain/request-context.js';
 import {
+  COUNT_CEILING,
   OffsetSchema,
   OptionalStringSchema,
   SessionInputSchema,
+  type Source,
   SourceSchema,
 } from '@/domain/schemas.js';
 import {
@@ -25,12 +31,15 @@ import {
   type Membership,
   type Speech,
 } from '@/services/openparliament/index.js';
-import { formatResult, renderValue } from './_format.js';
+import { formatResult, measuredTrailer, RESPONSE_BUDGET, responseBytes } from './_format.js';
+import { resolvePolitician } from './_member-identity.js';
 
 const BillScopeSchema = z
   .object({
     session: SessionInputSchema.describe('Required explicit parliament-session for this bill.'),
-    code: OptionalStringSchema.describe('Required bill code; accepts bill s321, S321, or S-321.'),
+    code: OptionalStringSchema.describe(
+      'Required bill code, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
+    ),
   })
   .strict()
   .describe('Explicit bill identity from canparl_search_bills.');
@@ -68,6 +77,66 @@ const SpeechSchema = z
   })
   .strict()
   .describe('One indexed House speech with complete text and historical affiliation.');
+/** Per-call match cap; each match may hydrate one membership request. */
+const MATCH_CAP = 10;
+const enrichment = {
+  appliedFilters: z
+    .object({
+      politician: z.string().nullable().describe('Normalized verified speaker slug, or null.'),
+      politicianName: z
+        .string()
+        .nullable()
+        .describe('Name on the verified OpenParliament speaker profile, or null.'),
+      billDebated: z.string().nullable().describe('Selected debated-bill path, or null.'),
+      mentionedBill: z.string().nullable().describe('Selected mentioned-bill path, or null.'),
+      dateFrom: z.string().nullable().describe('Inclusive normalized lower date, or null.'),
+      dateTo: z.string().nullable().describe('Inclusive normalized upper date, or null.'),
+      substantiveOnly: z.boolean().describe('Whether procedural remarks were excluded.'),
+      contains: z
+        .string()
+        .nullable()
+        .describe('Trimmed local literal English text filter, or null.'),
+      offset: z.number().int().nonnegative().describe('Requested raw candidate offset.'),
+    })
+    .strict()
+    .describe(
+      'All normalized filters applied with AND; bill relationships rely on the source endpoint.',
+    ),
+  shown: z.number().int().nonnegative().describe('Number of returned matching speeches.'),
+  cap: z
+    .number()
+    .int()
+    .positive()
+    .describe('Effective maximum returned matches after the per-call cap.'),
+  truncated: z
+    .boolean()
+    .describe(
+      'Whether raw candidates remain to be scanned; not an exact count of further matches.',
+    ),
+  excludedCommittees: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Visited candidates excluded because they were not House debate documents.'),
+  notice: z
+    .string()
+    .optional()
+    .describe(
+      'Limit clamp, coverage, continuation, procedural-filter, unavailable affiliation, and response-budget guidance.',
+    ),
+};
+/** Where a page ends: returned speeches, scan position, and the retrievals made before it. */
+interface PageEnd {
+  /** Response-budget stop after fitting speeches, or one speech exceeding the budget alone. */
+  budget?: 'stopped' | 'exceeded';
+  count: number;
+  excluded: number;
+  exhausted: boolean;
+  nextOffset: number | null;
+  scanned: number;
+  /** Scope and candidate-page provenance entries; returned memberships follow them. */
+  sources: number;
+}
 
 /** Find indexed House speeches without treating a bounded negative scan as absence. */
 export const searchSpeechesTool = tool('canparl_search_speeches', {
@@ -76,7 +145,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     politician: OptionalStringSchema.describe(
-      'Speaker slug or exact OpenParliament politician path/HTTPS URL from canparl_search_members.',
+      "Speaker OpenParliament slug or exact politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
     ),
     billDebated: BillScopeSchema.optional().describe(
       'Bill debated; combined with all other scopes using AND.',
@@ -103,9 +172,11 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       .number()
       .int()
       .min(1)
-      .max(10)
+      .max(COUNT_CEILING)
       .default(5)
-      .describe('Maximum returned matches, 1–10; candidate pages contain 20 rows.'),
+      .describe(
+        'Maximum returned matches, 1–10 per call; larger values up to 10000 clamp to 10 with a notice. A page ends early at the 24000-byte response budget, returning at least one match whole. Candidate pages contain 20 rows.',
+      ),
     offset: OffsetSchema.describe(
       'Raw candidate offset; keep every filter identical when continuing.',
     ),
@@ -119,7 +190,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       .int()
       .nonnegative()
       .describe(
-        'Raw candidates actually visited, including excluded committee records; at most 100.',
+        'Raw candidates visited, including excluded committee records; at most 100. A response-budget stop ends it before the first match not returned.',
       ),
     exhausted: z
       .boolean()
@@ -129,73 +200,41 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       .int()
       .nonnegative()
       .nullable()
-      .describe('First unvisited raw candidate offset, or null when exhausted.'),
+      .describe(
+        'First unvisited raw candidate offset, or null when exhausted; after a response-budget stop, the first match not returned.',
+      ),
     provenance: z
       .array(SourceSchema)
       .describe(
-        'Original retrieval metadata for scope validation, candidate pages, and successful membership retrievals.',
+        'Original retrieval metadata for scope validation, candidate pages fetched before the page ended, and memberships of returned speeches.',
       ),
   }),
-  enrichment: {
-    appliedFilters: z
-      .object({
-        politician: z.string().nullable().describe('Normalized verified speaker slug, or null.'),
-        billDebated: z.string().nullable().describe('Selected debated-bill path, or null.'),
-        mentionedBill: z.string().nullable().describe('Selected mentioned-bill path, or null.'),
-        dateFrom: z.string().nullable().describe('Inclusive normalized lower date, or null.'),
-        dateTo: z.string().nullable().describe('Inclusive normalized upper date, or null.'),
-        substantiveOnly: z.boolean().describe('Whether procedural remarks were excluded.'),
-        contains: z
-          .string()
-          .nullable()
-          .describe('Trimmed local literal English text filter, or null.'),
-        offset: z.number().int().nonnegative().describe('Requested raw candidate offset.'),
-      })
-      .strict()
-      .describe(
-        'All normalized filters applied with AND; bill relationships rely on the source endpoint.',
-      ),
-    shown: z.number().int().nonnegative().describe('Number of returned matching speeches.'),
-    cap: z.number().int().positive().describe('Requested maximum returned matches.'),
-    truncated: z
-      .boolean()
-      .describe(
-        'Whether raw candidates remain to be scanned; not an exact count of further matches.',
-      ),
-    excludedCommittees: z
-      .number()
-      .int()
-      .nonnegative()
-      .describe('Visited candidates excluded because they were not House debate documents.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Coverage, continuation, procedural-filter, and unavailable affiliation guidance.'),
-  },
-  enrichmentTrailer: {
-    appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
-  },
+  enrichment,
+  enrichmentTrailer: measuredTrailer(enrichment),
   errors: [
     {
       reason: 'speech_scope_required',
       code: JsonRpcErrorCode.ValidationError,
       when: 'No speaker, bill, or date bound is supplied.',
       recovery:
-        'Retry canparl_search_speeches with politician from canparl_search_members, a bill from canparl_search_bills, or a date bound.',
+        "Retry canparl_search_speeches with a politician (member.slug from canparl_get_member, a slug from an includeFormer canparl_search_members row, or a current MP's personId), a bill from canparl_search_bills, or a date bound.",
+      retryable: false,
     },
     {
       reason: 'invalid_speech_filter',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A slug, bill, or date is malformed, incomplete, or has reversed bounds.',
       recovery:
-        'Call canparl_list_reference with topic sessions, then retry canparl_search_speeches with canonical identifiers and valid date bounds.',
+        "Retry canparl_search_speeches in the shape the error names: a politician slug (member.slug from canparl_get_member or an includeFormer canparl_search_members row) or a current MP's personId, a bill session and code from canparl_search_bills, and YYYY-MM-DD dates with dateFrom no later than dateTo.",
+      retryable: false,
     },
     {
       reason: 'speech_entity_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'A supplied speaker or bill is absent from OpenParliament.',
+      when: 'A supplied speaker or bill is absent from OpenParliament, or a current personId has no unique verified profile.',
       recovery:
-        'Call canparl_search_members or canparl_search_bills to verify the identifier; OpenParliament may not yet index the official record.',
+        'Call canparl_search_members with includeFormer true or canparl_search_bills to verify the identifier; OpenParliament may not yet index the official record.',
+      retryable: false,
     },
     {
       reason: 'upstream_filter_not_honored',
@@ -209,39 +248,49 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
     try {
+      const limit = clampCount('limit', input.limit, MATCH_CAP);
       let politician: string | undefined;
       let billDebated: BillReference | undefined;
       let mentionedBill: BillReference | undefined;
       let dateFrom: string | undefined;
       let dateTo: string | undefined;
       try {
-        politician = input.politician ? normalizeSlug(input.politician) : undefined;
+        politician = normalizeFilter('politician', input.politician, normalizeSlug);
         const normalizeBill = (
+          field: 'billDebated' | 'mentionedBill',
           bill: z.infer<typeof BillScopeSchema> | undefined,
         ): BillReference | undefined => {
           if (!bill) return undefined;
-          const session = normalizeSession(bill.session);
-          if (!session || !bill.code) throw ctx.fail('invalid_speech_filter');
-          return { session, code: normalizeBillCode(bill.code) };
+          // A bill scope requires both parts; an omitted part is rejected as an empty value.
+          return {
+            session: normalizeFilter(`${field}.session`, bill.session ?? '', (value) =>
+              normalizeSession(value),
+            ),
+            code: normalizeFilter(`${field}.code`, bill.code ?? '', normalizeBillCode),
+          };
         };
-        billDebated = normalizeBill(input.billDebated);
-        mentionedBill = normalizeBill(input.mentionedBill);
-        dateFrom = input.dateFrom ? normalizeDate(input.dateFrom) : undefined;
-        dateTo = input.dateTo ? normalizeDate(input.dateTo) : undefined;
-        validateDateRange(dateFrom, dateTo);
-        if (dateTo === '9999-12-31') throw ctx.fail('invalid_speech_filter');
+        billDebated = normalizeBill('billDebated', input.billDebated);
+        mentionedBill = normalizeBill('mentionedBill', input.mentionedBill);
+        dateFrom = normalizeFilter('dateFrom', input.dateFrom, normalizeDate);
+        dateTo = normalizeFilter('dateTo', input.dateTo, normalizeDate);
+        normalizeFilter('dateFrom', dateFrom, (from) => validateDateRange(from, dateTo));
+        if (dateTo === '9999-12-31')
+          throw rejectFilter('dateTo', 'Expected a date before 9999-12-31.');
       } catch (error) {
-        throw ctx.fail('invalid_speech_filter', undefined, undefined, { cause: error });
+        throw ctx.fail('invalid_speech_filter', ...filterFailure(error));
       }
       if (!politician && !billDebated && !mentionedBill && !dateFrom && !dateTo)
         throw ctx.fail('speech_scope_required');
       const service = getOpenParliamentService();
-      const provenance: z.infer<typeof SourceSchema>[] = [];
+      const provenance: Source[] = [];
+      let politicianName: string | null = null;
+      if (politician) {
+        const profile = await resolvePolitician(politician, request, provenance);
+        if (!profile) throw ctx.fail('speech_entity_not_found');
+        politician = profile.slug;
+        politicianName = profile.name;
+      }
       try {
-        if (politician) {
-          const profile = await service.getPolitician(politician, request);
-          provenance.push(...profile.provenance);
-        }
         const bills = new Map(
           [billDebated, mentionedBill]
             .filter((bill) => bill !== undefined)
@@ -257,14 +306,154 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
           throw ctx.fail('speech_entity_not_found', undefined, undefined, { cause: error });
         throw error;
       }
-      const matches: Speech[] = [];
+      type Hydration = {
+        membership: Membership | null;
+        sources: Source[];
+        unavailable?: 'Timeout' | 'SourceUnavailable';
+      };
+      const memberships = new Map<string, Hydration>();
+      /** One membership request per distinct URL; optional failures leave affiliation unavailable. */
+      const hydrate = async (url: string): Promise<Hydration> => {
+        const known = memberships.get(url);
+        if (known) return known;
+        let hydration: Hydration;
+        try {
+          request.throwIfAborted();
+          const result = await service.getMembership(url, request);
+          hydration = { membership: result.data, sources: result.provenance };
+        } catch (error) {
+          request.throwIfOuterAborted();
+          if (
+            !(error instanceof McpError) ||
+            ![
+              JsonRpcErrorCode.NotFound,
+              JsonRpcErrorCode.ServiceUnavailable,
+              JsonRpcErrorCode.Timeout,
+              JsonRpcErrorCode.RateLimited,
+            ].includes(error.code)
+          )
+            throw error;
+          hydration = {
+            membership: null,
+            sources: [],
+            unavailable: error.code === JsonRpcErrorCode.Timeout ? 'Timeout' : 'SourceUnavailable',
+          };
+        }
+        memberships.set(url, hydration);
+        return hydration;
+      };
+      /** Party and riding from the membership in force on the speech date, never a current one. */
+      const attribute = (speech: Speech, membership: Membership | null) => {
+        const date = speech.time.slice(0, 10);
+        const valid =
+          membership &&
+          membership.startDate !== null &&
+          membership.startDate <= date &&
+          (membership.endDate === null || membership.endDate >= date) &&
+          (!speech.politician ||
+            membership.politicianUrl ===
+              `https://openparliament.ca/politicians/${speech.politician}/`);
+        const party = valid ? (membership.party.name ?? membership.party.shortName) : null;
+        const riding = valid ? membership.riding : null;
+        return { ...speech, party, riding };
+      };
+      const path = (bill: BillReference | undefined) =>
+        bill ? `/bills/${bill.session}/${bill.code}/` : null;
+      const appliedFilters = {
+        politician: politician ?? null,
+        politicianName,
+        billDebated: path(billDebated),
+        mentionedBill: path(mentionedBill),
+        dateFrom: dateFrom ?? null,
+        dateTo: dateTo ?? null,
+        substantiveOnly: input.substantiveOnly,
+        contains: input.contains ?? null,
+        offset: input.offset,
+      };
+      const accepted: ReturnType<typeof attribute>[] = [];
+      /** The response a page ending at `end` returns. */
+      const respond = (end: PageEnd) => {
+        const speeches = accepted.slice(0, end.count);
+        const notices = [
+          ...(limit.notice ? [limit.notice] : []),
+          input.substantiveOnly
+            ? 'substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.'
+            : 'substantiveOnly=false includes procedural and substantive remarks.',
+        ];
+        if (end.excluded)
+          notices.push(
+            'Non-House or committee candidates were excluded and are included in scanned and excludedCommittees.',
+          );
+        if (speeches.some((speech) => speech.party === null || speech.riding === null))
+          notices.push(
+            'Historical party or riding is unavailable for some returned speeches; nulls never substitute current affiliation.',
+          );
+        const unavailable = new Set(
+          speeches.flatMap((speech) => {
+            const reason = speech.membershipUrl
+              ? memberships.get(speech.membershipUrl)?.unavailable
+              : undefined;
+            return reason ? [reason] : [];
+          }),
+        );
+        if (unavailable.size)
+          notices.push(
+            `Optional historical membership enrichment was unavailable (${[...unavailable].join(', ')}).`,
+          );
+        if (!speeches.length)
+          notices.push(
+            !end.exhausted
+              ? 'No text matches among the scanned candidates; call canparl_search_speeches with nextOffset and identical filters to continue.'
+              : input.offset > 0 && end.scanned === 0
+                ? 'This offset is past the last indexed candidate; retry canparl_search_speeches with offset 0 and identical filters.'
+                : 'No indexed speeches matched; broaden dates or remove contains and retry canparl_search_speeches. This does not establish that no parliamentary speech occurred.',
+          );
+        const resume =
+          'call canparl_search_speeches with nextOffset and identical filters to continue.';
+        if (end.budget === 'exceeded')
+          notices.push(
+            `The response exceeds the ${RESPONSE_BUDGET}-byte budget with one speech, returned whole${end.exhausted ? '.' : `; ${resume}`}`,
+          );
+        else if (end.budget === 'stopped')
+          notices.push(
+            `The ${RESPONSE_BUDGET}-byte response budget ended this page after ${speeches.length} ${speeches.length === 1 ? 'speech' : 'speeches'}; ${resume}`,
+          );
+        const hydrated = new Set(speeches.flatMap(({ membershipUrl }) => membershipUrl ?? []));
+        const result = {
+          speeches,
+          scanned: end.scanned,
+          exhausted: end.exhausted,
+          nextOffset: end.nextOffset,
+          provenance: [
+            ...provenance.slice(0, end.sources),
+            ...[...hydrated].flatMap((url) => memberships.get(url)?.sources ?? []),
+          ],
+        };
+        const enriched = {
+          appliedFilters,
+          shown: speeches.length,
+          cap: limit.value,
+          truncated: !end.exhausted,
+          excludedCommittees: end.excluded,
+          notice: notices.join(' '),
+        };
+        return { result, enriched };
+      };
+      const bytes = (end: PageEnd) => {
+        const { result, enriched } = respond(end);
+        return responseBytes(result, enriched);
+      };
       let scanned = 0;
-      let excludedCommittees = 0;
+      let excluded = 0;
       let exhausted = false;
       let nextOffset: number | null = input.offset;
-      for (let pageNumber = 0; pageNumber < 5; pageNumber++) {
+      let end: PageEnd | undefined;
+      /** The page ending right after the last accepted speech, measured to fit the budget. */
+      let afterLast: PageEnd | undefined;
+      /** Accepted source speeches with the page ends just before and just after each one. */
+      const found: { speech: Speech; before: PageEnd; after: PageEnd }[] = [];
+      scan: for (let pageNumber = 0; pageNumber < 5 && nextOffset !== null; pageNumber++) {
         request.throwIfAborted();
-        if (nextOffset === null) break;
         const pageOffset: number = nextOffset;
         const page = await service.listSpeeches(
           {
@@ -280,11 +469,8 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
           request,
         );
         provenance.push(...page.provenance);
-        let visited = 0;
-        for (const speech of page.objects) {
-          request.throwIfAborted();
-          visited++;
-          scanned++;
+        for (const [index, speech] of page.objects.entries()) {
+          request.throwIfOuterAborted();
           const date = speech.time.slice(0, 10);
           if (
             (politician && speech.politician !== politician) ||
@@ -298,110 +484,91 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
             !new URL(speech.debateUrl).pathname.startsWith('/debates/') ||
             new URL(speech.url).pathname.startsWith('/committees/')
           ) {
-            excludedCommittees++;
-          } else if (!input.contains || includesText(speech.content, input.contains)) {
-            matches.push(speech);
+            excluded++;
+            scanned++;
+            continue;
           }
-          if (matches.length === input.limit) break;
+          if (input.contains && !includesText(speech.content, input.contains)) {
+            scanned++;
+            continue;
+          }
+          const before: PageEnd = {
+            count: accepted.length,
+            scanned,
+            excluded,
+            sources: provenance.length,
+            exhausted: false,
+            nextOffset: pageOffset + index,
+            budget: 'stopped',
+          };
+          accepted.push(attribute(speech, null));
+          scanned++;
+          const last = index === page.objects.length - 1;
+          const after: PageEnd = {
+            count: accepted.length,
+            scanned,
+            excluded,
+            sources: provenance.length,
+            exhausted: last && page.nextOffset === null,
+            nextOffset: last ? page.nextOffset : pageOffset + index + 1,
+          };
+          found.push({ speech, before, after });
+          const stopped: PageEnd = { ...after, budget: 'stopped' };
+          if (bytes(stopped) > RESPONSE_BUDGET) {
+            // Only a first speech may exceed alone; a later one is left for the next call.
+            end = !afterLast
+              ? { ...after, budget: 'exceeded' }
+              : bytes(before) <= RESPONSE_BUDGET
+                ? before
+                : afterLast;
+            break scan;
+          }
+          afterLast = stopped;
+          if (accepted.length === limit.value) {
+            end = after;
+            break scan;
+          }
         }
-        exhausted = visited === page.objects.length && page.nextOffset === null;
-        nextOffset = exhausted
-          ? null
-          : visited < page.objects.length
-            ? pageOffset + visited
-            : page.nextOffset;
-        if (matches.length === input.limit || exhausted) break;
+        exhausted = page.nextOffset === null;
+        nextOffset = page.nextOffset;
       }
-      const memberships = new Map<string, Membership | null>();
-      const unavailable = new Set<string>();
-      for (const speech of matches) {
+      end ??= {
+        count: accepted.length,
+        scanned,
+        excluded,
+        sources: provenance.length,
+        exhausted,
+        nextOffset,
+      };
+      // Candidates scanned after the last accepted speech can still outgrow the budget.
+      if (!end.budget && afterLast && bytes(end) > RESPONSE_BUDGET) end = afterLast;
+      // Memberships hydrate after the scan, so a slow optional lookup never spends the upstream
+      // budget required candidate pages need. Affiliation text can outgrow the scan's measure; the
+      // first speech that no longer fits is the one rejected, and the page ends before it.
+      for (const [index, { speech, before, after }] of found.slice(0, end.count).entries()) {
         request.throwIfOuterAborted();
-        const url = speech.membershipUrl;
-        if (!url || memberships.has(url)) continue;
-        try {
-          request.throwIfAborted();
-          const result = await service.getMembership(url, request);
-          provenance.push(...result.provenance);
-          memberships.set(url, result.data);
-        } catch (error) {
-          request.throwIfOuterAborted();
-          if (
-            !(error instanceof McpError) ||
-            ![
-              JsonRpcErrorCode.NotFound,
-              JsonRpcErrorCode.ServiceUnavailable,
-              JsonRpcErrorCode.Timeout,
-              JsonRpcErrorCode.RateLimited,
-            ].includes(error.code)
-          )
-            throw error;
-          memberships.set(url, null);
-          unavailable.add(
-            error.code === JsonRpcErrorCode.Timeout ? 'Timeout' : 'SourceUnavailable',
-          );
+        const hydration = speech.membershipUrl ? await hydrate(speech.membershipUrl) : null;
+        accepted[index] = attribute(speech, hydration?.membership ?? null);
+        if (end.budget === 'exceeded') continue;
+        const stopped: PageEnd = { ...after, budget: 'stopped' };
+        const final = index === end.count - 1;
+        if (bytes(final ? end : stopped) <= RESPONSE_BUDGET) continue;
+        if (final && bytes(stopped) <= RESPONSE_BUDGET) {
+          end = stopped;
+          continue;
         }
+        const previous = found[index - 1];
+        end = !previous
+          ? { ...after, budget: 'exceeded' }
+          : bytes(before) <= RESPONSE_BUDGET
+            ? before
+            : { ...previous.after, budget: 'stopped' };
+        break;
       }
-      let missingAffiliations = 0;
-      const speeches = matches.map((speech) => {
-        const membership = speech.membershipUrl ? memberships.get(speech.membershipUrl) : null;
-        const date = speech.time.slice(0, 10);
-        const valid =
-          membership &&
-          membership.startDate !== null &&
-          membership.startDate <= date &&
-          (membership.endDate === null || membership.endDate >= date) &&
-          (!speech.politician ||
-            membership.politicianUrl ===
-              `https://openparliament.ca/politicians/${speech.politician}/`);
-        const party = valid ? (membership.party.name ?? membership.party.shortName) : null;
-        const riding = valid ? membership.riding : null;
-        if (party === null || riding === null) missingAffiliations++;
-        return { ...speech, party, riding };
-      });
-      const notices = [
-        input.substantiveOnly
-          ? 'substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.'
-          : 'substantiveOnly=false includes procedural and substantive remarks.',
-      ];
-      if (excludedCommittees)
-        notices.push(
-          'Non-House or committee candidates were excluded and are included in scanned and excludedCommittees.',
-        );
-      if (missingAffiliations)
-        notices.push(
-          'Historical party or riding is unavailable for some returned speeches; nulls never substitute current affiliation.',
-        );
-      if (unavailable.size)
-        notices.push(
-          `Optional historical membership enrichment was unavailable (${[...unavailable].join(', ')}).`,
-        );
-      if (!speeches.length)
-        notices.push(
-          exhausted
-            ? 'No indexed speeches matched; broaden dates or remove contains and retry canparl_search_speeches. This does not establish that no parliamentary speech occurred.'
-            : 'No text matches among the scanned candidates; call canparl_search_speeches with nextOffset and identical filters to continue.',
-        );
-      const path = (bill: BillReference | undefined) =>
-        bill ? `/bills/${bill.session}/${bill.code}/` : null;
-      ctx.enrich({
-        appliedFilters: {
-          politician: politician ?? null,
-          billDebated: path(billDebated),
-          mentionedBill: path(mentionedBill),
-          dateFrom: dateFrom ?? null,
-          dateTo: dateTo ?? null,
-          substantiveOnly: input.substantiveOnly,
-          contains: input.contains ?? null,
-          offset: input.offset,
-        },
-        shown: speeches.length,
-        cap: input.limit,
-        truncated: !exhausted,
-        excludedCommittees,
-      });
-      ctx.enrich.notice(notices.join(' '));
+      const { result, enriched } = respond(end);
+      ctx.enrich(enriched);
       request.throwIfOuterAborted();
-      return { speeches, scanned, exhausted, nextOffset, provenance };
+      return result;
     } finally {
       request.dispose();
     }

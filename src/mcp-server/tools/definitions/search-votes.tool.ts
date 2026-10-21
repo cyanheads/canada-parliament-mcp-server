@@ -1,19 +1,27 @@
 /** @fileoverview Complete official-session division search. @module mcp-server/tools/definitions/search-votes.tool */
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  clampCount,
+  filterFailure,
   includesText,
   normalizeBillCode,
   normalizeDate,
+  normalizeFilter,
   normalizeSession,
   normalizeVocabulary,
   paginate,
   validateDateRange,
-  vocabularyKey,
 } from '@/domain/normalization.js';
-import { extendVocabulary, VOTE_DOCUMENT_TYPES, VOTE_RESULTS } from '@/domain/reference-catalog.js';
+import {
+  extendVocabulary,
+  VOTE_DOCUMENT_TYPES,
+  VOTE_RESULT_ALIASES,
+  VOTE_RESULTS,
+} from '@/domain/reference-catalog.js';
 import { createRequestContext } from '@/domain/request-context.js';
 import {
+  LIST_CAP,
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
@@ -51,7 +59,9 @@ export const searchVotesTool = tool('canparl_search_votes', {
   inputAliases: { query: 'subjectContains' },
   input: z.object({
     session: SessionInputSchema,
-    billCode: OptionalStringSchema.describe('Exact bill code; accepts bill s321, S321, or S-321.'),
+    billCode: OptionalStringSchema.describe(
+      'Exact bill code, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
+    ),
     result: OptionalStringSchema.describe(
       'Official result from vote_results; Passed and Failed are accepted aliases.',
     ),
@@ -94,9 +104,9 @@ export const searchVotesTool = tool('canparl_search_votes', {
       .describe('Normalized AND filters.'),
     totalCount: z.number().int().nonnegative().describe('Exact matching count.'),
     shown: z.number().int().nonnegative().describe('Returned division count.'),
-    cap: z.number().int().positive().describe('Requested page limit.'),
+    cap: z.number().int().positive().describe('Effective page limit after the per-call cap.'),
     truncated: z.boolean().describe('Whether more matches remain.'),
-    notice: z.string().optional().describe('Empty-result or past-end guidance.'),
+    notice: z.string().optional().describe('Limit clamp, empty-result, or past-end guidance.'),
   },
   enrichmentTrailer: {
     appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
@@ -105,7 +115,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
     {
       reason: 'unsupported_vote_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Session absent from the official division picker.',
+      when: 'Session malformed or absent from the official division picker.',
       recovery:
         'Call canparl_list_reference with topic sessions and choose a session supporting House divisions.',
       retryable: false,
@@ -116,7 +126,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'Bill code, result, or document category is unrecognized.',
       recovery:
-        'Call canparl_list_reference with topic vote_results or vote_document_types, then retry canparl_search_votes with the canonical value.',
+        'Retry canparl_search_votes with a value or bill-code shape the error names; canparl_list_reference topics vote_results and vote_document_types list results and categories.',
       retryable: false,
     },
     {
@@ -131,53 +141,50 @@ export const searchVotesTool = tool('canparl_search_votes', {
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
     try {
-      const provenance = [];
-      let session = normalizeSession(input.session);
-      if (!session) {
-        const current = await getLegisinfoService().getCurrentSession(request);
-        session = current.data;
-        provenance.push(...current.provenance);
+      const limit = clampCount('limit', input.limit, LIST_CAP);
+      let requested: string | undefined;
+      try {
+        requested = normalizeFilter('session', input.session, (value) => normalizeSession(value));
+      } catch (error) {
+        throw ctx.fail('unsupported_vote_session', ...filterFailure(error));
       }
+      const resolved = await getLegisinfoService().resolveSession(requested, request);
+      const session = resolved.data;
+      const provenance = [...resolved.provenance];
       let dateFrom: string | undefined;
       let dateTo: string | undefined;
       try {
-        dateFrom = input.dateFrom ? normalizeDate(input.dateFrom) : undefined;
-        dateTo = input.dateTo ? normalizeDate(input.dateTo) : undefined;
-        validateDateRange(dateFrom, dateTo);
+        dateFrom = normalizeFilter('dateFrom', input.dateFrom, normalizeDate);
+        dateTo = normalizeFilter('dateTo', input.dateTo, normalizeDate);
+        normalizeFilter('dateFrom', dateFrom, (from) => validateDateRange(from, dateTo));
       } catch (error) {
-        if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.ValidationError)
-          throw error;
-        throw ctx.fail('invalid_date_range', undefined, undefined, { cause: error });
+        throw ctx.fail('invalid_date_range', ...filterFailure(error));
       }
       const result = await getOurCommonsService().listVotes(session, request);
       provenance.push(...result.provenance);
-      let billCode: string | null = null;
-      let voteResult: string | null = null;
-      let documentType: string | null = null;
+      let billCode: string | null;
+      let voteResult: string | null;
+      let documentType: string | null;
       try {
-        if (input.billCode) billCode = normalizeBillCode(input.billCode);
-        if (input.result) {
-          const key = vocabularyKey(input.result);
-          voteResult = normalizeVocabulary(
-            key === 'passed' ? 'Agreed To' : key === 'failed' ? 'Negatived' : input.result,
-            extendVocabulary(
-              VOTE_RESULTS,
-              result.data.map((row) => row.result),
-            ),
-          );
-        }
-        if (input.documentType)
-          documentType = normalizeVocabulary(
-            input.documentType,
-            extendVocabulary(
-              VOTE_DOCUMENT_TYPES,
-              result.data.map((row) => row.documentType),
-            ),
-          );
+        billCode = normalizeFilter('billCode', input.billCode, normalizeBillCode) ?? null;
+        const results = extendVocabulary(
+          VOTE_RESULTS,
+          result.data.map((row) => row.result),
+        );
+        voteResult =
+          normalizeFilter('result', input.result, (value) =>
+            normalizeVocabulary(value, results, VOTE_RESULT_ALIASES),
+          ) ?? null;
+        const documentTypes = extendVocabulary(
+          VOTE_DOCUMENT_TYPES,
+          result.data.map((row) => row.documentType),
+        );
+        documentType =
+          normalizeFilter('documentType', input.documentType, (value) =>
+            normalizeVocabulary(value, documentTypes),
+          ) ?? null;
       } catch (error) {
-        if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.ValidationError)
-          throw error;
-        throw ctx.fail('invalid_vote_filter', undefined, undefined, { cause: error });
+        throw ctx.fail('invalid_vote_filter', ...filterFailure(error));
       }
       const filtered = result.data
         .filter(
@@ -190,7 +197,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
             (!input.subjectContains || includesText(row.subject, input.subjectContains)),
         )
         .sort((a, b) => (b.dateTime ?? '').localeCompare(a.dateTime ?? '') || b.number - a.number);
-      const page = paginate(filtered, input.offset, input.limit);
+      const page = paginate(filtered, input.offset, limit.value);
       ctx.enrich({
         appliedFilters: {
           session,
@@ -202,11 +209,12 @@ export const searchVotesTool = tool('canparl_search_votes', {
           subjectContains: input.subjectContains ?? null,
         },
         shown: page.items.length,
-        cap: input.limit,
+        cap: limit.value,
         truncated: page.pagination.hasMore,
       });
       ctx.enrich.total(page.total);
       const notices = [];
+      if (limit.notice) notices.push(limit.notice);
       if (!page.total)
         notices.push(
           'No divisions matched; broaden the dates or remove billCode, result, or subjectContains and retry canparl_search_votes.',

@@ -2,7 +2,11 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RESPONSE_BUDGET } from '@/mcp-server/tools/definitions/_format.js';
 import { searchSpeechesTool } from '@/mcp-server/tools/definitions/search-speeches.tool.js';
+import { disposeOurCommonsService, initOurCommonsService } from '@/services/ourcommons/index.js';
+import { wireBytes } from '../fixtures/bill-tools/harness.js';
+import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
 import {
   actor,
   api,
@@ -18,6 +22,18 @@ import {
   speech,
   teardown,
 } from '../fixtures/speech-tools/harness.js';
+import { collection, rawPerson, rosterUrl } from '../fixtures/vote-tools/harness.js';
+
+const SUBSTANTIVE =
+  'substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.';
+const EXCLUDED =
+  'Non-House or committee candidates were excluded and are included in scanned and excludedCommittees.';
+const budgetNotice = (shown: number) =>
+  `The 24000-byte response budget ended this page after ${shown} ${shown === 1 ? 'speech' : 'speeches'}; call canparl_search_speeches with nextOffset and identical filters to continue.`;
+const MISSING =
+  'Historical party or riding is unavailable for some returned speeches; nulls never substitute current affiliation.';
+const oversized =
+  'The response exceeds the 24000-byte budget with one speech, returned whole; call canparl_search_speeches with nextOffset and identical filters to continue.';
 
 describe('canparl_search_speeches production contract', () => {
   let http: ReturnType<typeof setup>;
@@ -34,6 +50,30 @@ describe('canparl_search_speeches production contract', () => {
       await call(input),
       searchSpeechesTool.errors!.find((error) => error.reason === reason)!,
     );
+  const ids = (data: Record<string, unknown>) =>
+    (data.speeches as { id: string }[]).map((row) => row.id);
+  /** A House speech whose English text holds `marker` and `chars` letters, with its own membership. */
+  const long = (id: number, chars: number, extra: Record<string, unknown> = {}) =>
+    speech(id, {
+      content: { en: `<p>marker ${'a'.repeat(chars)}</p>` },
+      politician_membership_url: `/politicians/memberships/${id + 1}/`,
+      ...extra,
+    });
+  function memberships() {
+    http.route({
+      match: (request) => new URL(request.url).pathname.startsWith('/politicians/memberships/'),
+      respond: (request) => Response.json(membership({ url: new URL(request.url).pathname })),
+    });
+  }
+  const pageCalls = () =>
+    http.calls.filter(({ request }) => new URL(request.url).pathname === '/speeches/').length;
+  const membershipCalls = () =>
+    http.calls.flatMap(({ request }) => {
+      const id = /^\/politicians\/memberships\/(\d+)\/$/.exec(new URL(request.url).pathname)?.[1];
+      return id === undefined ? [] : [id];
+    });
+  const provenancePaths = (data: Record<string, unknown>) =>
+    (data.provenance as { url: string }[]).map((source) => new URL(source.url).pathname);
   it('intersects normalized speaker, both identical bills, dates, and literal English text', async () => {
     profile(http);
     bill(http);
@@ -84,6 +124,21 @@ describe('canparl_search_speeches production contract', () => {
       searchSpeechesTool,
     );
     expect(http.calls).toHaveLength(3);
+  });
+  it('scopes a split bill by its exact suffixed code', async () => {
+    bill(http, 'C-15A');
+    pages(http, [], { bill_debated: '/bills/45-1/C-15A/', mentioned_bill: '/bills/45-1/C-15A/' });
+    const data = parity(
+      await call({
+        billDebated: { session: '45-1', code: 'c 15a' },
+        mentionedBill: { session: '45-1', code: 'C-15A' },
+      }),
+      searchSpeechesTool,
+    );
+    expect(data).toMatchObject({
+      appliedFilters: { billDebated: '/bills/45-1/C-15A/', mentionedBill: '/bills/45-1/C-15A/' },
+    });
+    expect(http.calls).toHaveLength(2);
   });
   it.each([{ dateFrom: '2026-10-19' }, { dateTo: '2026-10-19' }])(
     'supports independent date bound %j',
@@ -167,7 +222,29 @@ describe('canparl_search_speeches production contract', () => {
       scanned: 0,
       exhausted: true,
       nextOffset: null,
+      notice: `${SUBSTANTIVE} This offset is past the last indexed candidate; retry canparl_search_speeches with offset 0 and identical filters.`,
     });
+  });
+  it.each<[string, Record<string, unknown>[], number]>([
+    ['an empty scope at offset 0', [], 0],
+    ['unmatched candidates after a nonzero offset', [speech(1), speech(2)], 1],
+  ])('reports no indexed match for %s', async (_, rows, offset) => {
+    pages(http, rows, { time__gte: '2026-10-19' });
+    expect(await success({ offset, contains: 'never present' })).toMatchObject({
+      speeches: [],
+      exhausted: true,
+      notice: `${SUBSTANTIVE} No indexed speeches matched; broaden dates or remove contains and retry canparl_search_speeches. This does not establish that no parliamentary speech occurred.`,
+    });
+  });
+  it('names working politician sources in its recovery hints', () => {
+    const recovery = (reason: string) =>
+      searchSpeechesTool.errors!.find((error) => error.reason === reason)!.recovery;
+    expect(recovery('speech_scope_required')).toBe(
+      "Retry canparl_search_speeches with a politician (member.slug from canparl_get_member, a slug from an includeFormer canparl_search_members row, or a current MP's personId), a bill from canparl_search_bills, or a date bound.",
+    );
+    expect(recovery('invalid_speech_filter')).toBe(
+      "Retry canparl_search_speeches in the shape the error names: a politician slug (member.slug from canparl_get_member or an includeFormer canparl_search_members row) or a current MP's personId, a bill session and code from canparl_search_bills, and YYYY-MM-DD dates with dateFrom no later than dateTo.",
+    );
   });
   it('excludes committees and missing documents while preserving institutional and missing-body rows', async () => {
     pages(
@@ -219,30 +296,93 @@ describe('canparl_search_speeches production contract', () => {
       expect(http.calls).toHaveLength(0);
     },
   );
-  it.each([
-    { politician: 'First Last' },
-    { politician: 'https://evil.test/politicians/river-example/' },
-    { billDebated: {} },
-    { billDebated: { session: '45-1', code: '' } },
-    { mentionedBill: { session: '45-1', code: 'C-0' } },
-    { dateFrom: '2026-02-30' },
-    { dateTo: '9999-12-31' },
-    { dateFrom: '2026-10-20', dateTo: '2026-10-19' },
-  ])('returns invalid filter recovery %j', async (input) => {
-    await fail(input, 'invalid_speech_filter');
+  const slug = 'Expected an OpenParliament politician slug';
+  const session = 'Expected a parliament-session token such as 45-1';
+  const code = 'Expected a House or Senate bill code such as C-15';
+  const date = 'Expected a real calendar date written YYYY-MM-DD';
+  it.each<[Record<string, unknown>, FilterRejection]>([
+    [{ politician: 'First Last' }, { field: 'politician', rejected: 'First Last', shape: slug }],
+    [
+      { politician: 'https://evil.test/politicians/river-example/' },
+      { field: 'politician', rejected: 'evil.test', shape: slug },
+    ],
+    [{ politician: 'https://' }, { field: 'politician', rejected: 'https://', shape: slug }],
+    [{ billDebated: {} }, { field: 'billDebated.session', rejected: '', shape: session }],
+    [
+      { billDebated: { session: '45-0', code: 'S321' } },
+      { field: 'billDebated.session', rejected: '45-0', shape: session },
+    ],
+    [
+      { mentionedBill: { session: '9007199254740992-1', code: 'S321' } },
+      { field: 'mentionedBill.session', rejected: '9007199254740992-1', shape: session },
+    ],
+    [
+      { mentionedBill: { code: 'S321' } },
+      { field: 'mentionedBill.session', rejected: '', shape: session },
+    ],
+    [
+      { billDebated: { session: '45-1', code: '' } },
+      { field: 'billDebated.code', rejected: '', shape: code },
+    ],
+    [
+      { mentionedBill: { session: '45-1', code: 'C-0' } },
+      { field: 'mentionedBill.code', rejected: 'C-0', shape: code },
+    ],
+    [
+      { mentionedBill: { session: '45-1', code: 'C - 9' } },
+      { field: 'mentionedBill.code', rejected: 'C - 9', shape: code },
+    ],
+    [{ dateFrom: '2026-02-30' }, { field: 'dateFrom', rejected: '2026-02-30', shape: date }],
+    [
+      { dateTo: '9999-12-31' },
+      { field: 'dateTo', rejected: '', shape: 'Expected a date before 9999-12-31' },
+    ],
+    [
+      { dateFrom: '2026-10-20', dateTo: '2026-10-19' },
+      { field: 'dateFrom', rejected: '2026-10-2', shape: 'Expected a date no later than dateTo' },
+    ],
+  ])('returns invalid filter recovery %j', async (input, expected) => {
+    const result = await call(input);
+    failure(
+      result,
+      searchSpeechesTool.errors!.find((error) => error.reason === 'invalid_speech_filter')!,
+    );
+    assertFilterRejection(result, expected);
     expect(http.calls).toHaveLength(0);
+  });
+  it.each([
+    ['speech_scope_required', {}],
+    ['invalid_speech_filter', { dateFrom: '2026-02-30' }],
+  ])('declares %s not retryable on both surfaces', async (reason, input) => {
+    const result = await call(input);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason, retryable: false } },
+    });
+    expect(
+      result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+    ).toContain(`(reason ${reason} · not retryable`);
   });
   it.each([{ politician: 'river-example' }, { billDebated: { session: '45-1', code: 'S321' } }])(
     'maps absent scope entity %j',
     async (input) => {
       http.route({ match: () => true, respond: new Response('missing', { status: 404 }) });
-      await fail(input, 'speech_entity_not_found');
+      const result = await call(input);
+      failure(
+        result,
+        searchSpeechesTool.errors!.find((error) => error.reason === 'speech_entity_not_found')!,
+      );
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'speech_entity_not_found', retryable: false } },
+      });
+      expect(
+        result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+      ).toContain('(reason speech_entity_not_found · not retryable');
       expect(http.calls).toHaveLength(1);
     },
   );
   it.each([
     { limit: 0 },
-    { limit: 11 },
+    { limit: 10_001 },
     { offset: -1 },
     { billDebated: { session: '45-1', code: 'S321', other: true } },
   ])('rejects schema-invalid input %j', async (input) => {
@@ -352,9 +492,46 @@ describe('canparl_search_speeches production contract', () => {
       match: (request) => new URL(request.url).pathname.startsWith('/politicians/memberships/'),
       respond: (request) => Response.json(membership({ url: new URL(request.url).pathname })),
     });
-    expect(await success({ limit: 10 })).toMatchObject({ shown: 10, scanned: 10, exhausted: true });
+    expect(await success({ limit: 10 })).toMatchObject({
+      shown: 10,
+      scanned: 10,
+      exhausted: true,
+      notice:
+        'substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.',
+    });
     expect(http.calls).toHaveLength(11);
   });
+  it.each([11, 10_000])(
+    'clamps limit %i to ten matches and ten membership hydrations',
+    async (limit) => {
+      pages(
+        http,
+        Array.from({ length: 30 }, (_, i) =>
+          speech(i, { politician_membership_url: `/politicians/memberships/${i + 1}/` }),
+        ),
+        { time__gte: '2026-10-19' },
+      );
+      http.route({
+        match: (request) => new URL(request.url).pathname.startsWith('/politicians/memberships/'),
+        respond: (request) => Response.json(membership({ url: new URL(request.url).pathname })),
+      });
+      const notice = `limit ${limit} exceeds the per-call maximum of 10; returned up to 10. substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.`;
+      expect(await success({ limit })).toMatchObject({
+        shown: 10,
+        cap: 10,
+        scanned: 10,
+        exhausted: false,
+        truncated: true,
+        nextOffset: 10,
+        notice,
+      });
+      expect(http.calls).toHaveLength(11);
+      const rest = await success({ limit, offset: 20 });
+      expect(rest).toMatchObject({ shown: 10, cap: 10, scanned: 10, exhausted: true, notice });
+      expect((rest.speeches as { id: string }[]).at(-1)?.id).toBe('29');
+      expect(http.calls).toHaveLength(22);
+    },
+  );
   it('returns speeches when only the optional 45 second child budget expires', async () => {
     pages(
       http,
@@ -389,6 +566,39 @@ describe('canparl_search_speeches production contract', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(http.calls).toHaveLength(callsAtDeadline);
   });
+  it('finishes the candidate scan when early matches hang on membership lookups', async () => {
+    pages(
+      http,
+      Array.from({ length: 100 }, (_, i) => (i < 2 ? long(i, 10) : speech(i))),
+      { time__gte: '2026-10-19' },
+      false,
+    );
+    http.route({
+      match: (request) => new URL(request.url).pathname.startsWith('/politicians/memberships/'),
+      respond: (request) =>
+        new Promise<Response>((_resolve, reject) =>
+          request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+            once: true,
+          }),
+        ),
+    });
+    const pending = runToolContract(searchSpeechesTool, {
+      dateFrom: '2026-10-19',
+      limit: 10,
+      contains: 'marker',
+    });
+    await vi.advanceTimersByTimeAsync(50_001);
+    const data = parity(await pending, searchSpeechesTool);
+    expect(data).toMatchObject({
+      shown: 2,
+      scanned: 100,
+      nextOffset: 100,
+      exhausted: false,
+      speeches: [{ party: null }, { party: null }],
+      notice: expect.stringContaining('unavailable (Timeout)'),
+    });
+    expect(pageCalls()).toBe(5);
+  });
   it('fails required scans on budget exhaustion rather than returning a negative result', async () => {
     http.route({
       match: (request) => new URL(request.url).pathname === '/speeches/',
@@ -405,25 +615,232 @@ describe('canparl_search_speeches production contract', () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({ error: { code: JsonRpcErrorCode.Timeout } });
   });
-  it('keeps complete long prose and stops at ten matches before the source page ends', async () => {
+  it('returns each oversized speech whole and alone, continuing at the next candidate', async () => {
     const prose = 'École 中文 [literal].*\n'.repeat(800);
     pages(
       http,
       Array.from({ length: 20 }, (_, i) => speech(i, { content: { en: prose } })),
       { time__gte: '2026-10-19' },
     );
-    const data = await success({ limit: 10 });
-    expect(data).toMatchObject({
-      shown: 10,
-      scanned: 10,
-      exhausted: false,
-      nextOffset: 10,
-      truncated: true,
-    });
-    expect((data.speeches as { content: string }[]).every((row) => row.content === prose)).toBe(
-      true,
+    for (const offset of [0, 1]) {
+      const reply = await call({ dateFrom: '2026-10-19', limit: 10, offset });
+      const data = parity(reply, searchSpeechesTool);
+      expect(data).toMatchObject({
+        shown: 1,
+        scanned: 1,
+        exhausted: false,
+        nextOffset: offset + 1,
+        truncated: true,
+        notice: `${SUBSTANTIVE} ${MISSING} ${oversized}`,
+      });
+      expect(data.speeches).toMatchObject([{ id: String(offset), content: prose }]);
+      expect(wireBytes(reply)).toBeGreaterThan(RESPONSE_BUDGET);
+    }
+    expect(pageCalls()).toBe(2);
+  });
+  it('stops at the first match that does not fit and resumes from it', async () => {
+    memberships();
+    pages(
+      http,
+      [
+        long(0, 3_800),
+        long(1, 3_800, { document_url: '/committees/finance/1/' }),
+        long(2, 3_800),
+        long(3, 3_800),
+        long(4, 3_800),
+      ],
+      { time__gte: '2026-10-19' },
     );
-    expect(http.calls).toHaveLength(1);
+    const first = await success({ limit: 10 });
+    expect(first).toMatchObject({
+      shown: 2,
+      scanned: 3,
+      excludedCommittees: 1,
+      exhausted: false,
+      nextOffset: 3,
+      truncated: true,
+      notice: `${SUBSTANTIVE} ${EXCLUDED} ${budgetNotice(2)}`,
+    });
+    expect(ids(first)).toEqual(['0', '2']);
+    expect(first.speeches).toMatchObject([
+      { party: 'Historical [party]' },
+      { party: 'Historical [party]' },
+    ]);
+    expect(provenancePaths(first)).toEqual([
+      '/speeches/',
+      '/politicians/memberships/1/',
+      '/politicians/memberships/3/',
+    ]);
+    expect(membershipCalls()).toEqual(['1', '3']);
+    expect(pageCalls()).toBe(1);
+    const rest = await success({ limit: 10, offset: 3 });
+    expect(ids(rest)).toEqual(['3', '4']);
+    expect(rest).toMatchObject({ scanned: 2, nextOffset: null, exhausted: true, truncated: false });
+  });
+  it.each([undefined, 'marker'])(
+    'returns every match exactly once across budget pages with contains %s',
+    async (contains) => {
+      memberships();
+      const rows = Array.from({ length: 30 }, (_, i) =>
+        i % 5 === 1
+          ? speech(i, { document_url: '/committees/finance/1/' })
+          : i % 5 === 3
+            ? speech(i)
+            : long(i, 3_800),
+      );
+      pages(http, rows, { time__gte: '2026-10-19' });
+      const expected = rows
+        .filter((_, i) => i % 5 !== 1 && (!contains || i % 5 !== 3))
+        .map((row) => row.source_id);
+      const seen: string[] = [];
+      let offset = 0;
+      for (;;) {
+        const data = await success({ limit: 10, offset, ...(contains ? { contains } : {}) });
+        seen.push(...ids(data));
+        expect(data.nextOffset).toBe(data.exhausted ? null : offset + (data.scanned as number));
+        if (data.exhausted) break;
+        expect(data.notice).toContain(budgetNotice(ids(data).length));
+        offset = data.nextOffset as number;
+      }
+      expect(seen).toEqual(expected);
+    },
+  );
+  it('ends an oversized last candidate of a terminal page as exhausted', async () => {
+    pages(http, [speech(0, { content: { en: `<p>${'a'.repeat(30_000)}</p>` } })], {
+      time__gte: '2026-10-19',
+    });
+    expect(await success({ limit: 5 })).toMatchObject({
+      shown: 1,
+      scanned: 1,
+      exhausted: true,
+      nextOffset: null,
+      truncated: false,
+      notice: `${SUBSTANTIVE} ${MISSING} The response exceeds the 24000-byte budget with one speech, returned whole.`,
+    });
+  });
+  it('fetches no candidate page after a sparse scan fills the page', async () => {
+    memberships();
+    pages(
+      http,
+      Array.from({ length: 100 }, (_, i) => (i % 20 === 0 ? long(i, 7_000) : speech(i))),
+      { time__gte: '2026-10-19' },
+      false,
+    );
+    const data = await success({ limit: 10, contains: 'marker' });
+    expect(data).toMatchObject({
+      shown: 1,
+      scanned: 20,
+      nextOffset: 20,
+      exhausted: false,
+      truncated: true,
+      notice: `${SUBSTANTIVE} ${budgetNotice(1)}`,
+    });
+    expect(pageCalls()).toBe(2);
+    expect(membershipCalls()).toEqual(['1']);
+    expect(provenancePaths(data)).toEqual([
+      '/speeches/',
+      '/speeches/',
+      '/politicians/memberships/1/',
+    ]);
+  });
+  it('hydrates after the scan and ends the page before a match whose affiliation outgrows the budget', async () => {
+    http.route({
+      match: (request) => new URL(request.url).pathname.startsWith('/politicians/memberships/'),
+      respond: (request) =>
+        Response.json(
+          membership({
+            url: new URL(request.url).pathname,
+            riding: { name: { en: 'r'.repeat(5_000) }, province: 'ON' },
+          }),
+        ),
+    });
+    pages(
+      http,
+      Array.from({ length: 21 }, (_, i) => (i % 20 === 0 ? long(i, 3_000) : speech(i))),
+      { time__gte: '2026-10-19' },
+    );
+    const reply = await call({ dateFrom: '2026-10-19', limit: 10, contains: 'marker' });
+    const data = parity(reply, searchSpeechesTool);
+    expect(data).toMatchObject({
+      shown: 1,
+      scanned: 20,
+      nextOffset: 20,
+      exhausted: false,
+      truncated: true,
+      notice: `${SUBSTANTIVE} ${budgetNotice(1)}`,
+    });
+    expect(http.calls.map(({ request }) => new URL(request.url).pathname)).toEqual([
+      '/speeches/',
+      '/speeches/',
+      '/politicians/memberships/1/',
+      '/politicians/memberships/21/',
+    ]);
+    expect(provenancePaths(data)).toEqual([
+      '/speeches/',
+      '/speeches/',
+      '/politicians/memberships/1/',
+    ]);
+    expect(wireBytes(reply)).toBeLessThanOrEqual(RESPONSE_BUDGET);
+    const rest = await success({ limit: 10, offset: 20, contains: 'marker' });
+    expect(ids(rest)).toEqual(['20']);
+    expect(rest).toMatchObject({ exhausted: true, nextOffset: null });
+  });
+  /** Body length that puts a one-speech, one-page response near `target` wire bytes. */
+  async function sized(target: number) {
+    const probe = 4_000;
+    memberships();
+    pages(http, [long(99, probe)], { time__gte: '2026-10-19', time__lt: '2026-10-20' });
+    const reply = await call({ dateFrom: '2026-10-19', dateTo: '2026-10-19', contains: 'marker' });
+    http.reset();
+    return probe + Math.floor((target - wireBytes(reply)) / 2);
+  }
+  it('ends the page after the last fitting speech when later candidate pages outgrow the budget', async () => {
+    const chars = await sized(23_100);
+    memberships();
+    pages(
+      http,
+      Array.from({ length: 100 }, (_, i) => (i === 0 ? long(0, chars) : speech(i))),
+      { time__gte: '2026-10-19' },
+      false,
+    );
+    const reply = await call({ dateFrom: '2026-10-19', limit: 10, contains: 'marker' });
+    const data = parity(reply, searchSpeechesTool);
+    expect(data).toMatchObject({
+      shown: 1,
+      scanned: 1,
+      nextOffset: 1,
+      exhausted: false,
+      truncated: true,
+      notice: `${SUBSTANTIVE} ${budgetNotice(1)}`,
+    });
+    expect(pageCalls()).toBe(5);
+    expect(provenancePaths(data)).toEqual(['/speeches/', '/politicians/memberships/1/']);
+    expect(wireBytes(reply)).toBeLessThanOrEqual(RESPONSE_BUDGET);
+  });
+  it('ends the page after the last fitting speech when a rejected match follows outgrown candidate pages', async () => {
+    const chars = await sized(23_100);
+    memberships();
+    pages(
+      http,
+      Array.from({ length: 100 }, (_, i) =>
+        i === 0 ? long(0, chars) : i === 60 ? long(60, 10) : speech(i),
+      ),
+      { time__gte: '2026-10-19' },
+      false,
+    );
+    const reply = await call({ dateFrom: '2026-10-19', limit: 10, contains: 'marker' });
+    const data = parity(reply, searchSpeechesTool);
+    expect(data).toMatchObject({
+      shown: 1,
+      scanned: 1,
+      nextOffset: 1,
+      exhausted: false,
+      notice: `${SUBSTANTIVE} ${budgetNotice(1)}`,
+    });
+    expect(pageCalls()).toBe(4);
+    expect(membershipCalls()).toEqual(['1']);
+    expect(provenancePaths(data)).toEqual(['/speeches/', '/politicians/memberships/1/']);
+    expect(wireBytes(reply)).toBeLessThanOrEqual(RESPONSE_BUDGET);
   });
   it('never turns outer deadline expiry during optional membership into partial success', async () => {
     pages(http, [speech(1, { politician_membership_url: member })], { time__gte: '2026-10-19' });
@@ -445,5 +862,145 @@ describe('canparl_search_speeches production contract', () => {
       ]),
     );
     expect(http.calls).toHaveLength(2);
+  });
+});
+
+describe('canparl_search_speeches speaker identity', () => {
+  const namePage = `${api}/politicians/?limit=4&offset=0&include=all&name=River+Example`;
+  const notFound = searchSpeechesTool.errors!.find(
+    (error) => error.reason === 'speech_entity_not_found',
+  )!;
+  let http: ReturnType<typeof setup>;
+  beforeEach(() => {
+    http = setup();
+    initOurCommonsService({ userAgent: 'synthetic-speech-tests' });
+  });
+  afterEach(() => {
+    disposeOurCommonsService();
+    teardown(http);
+  });
+  const roster = (...ids: number[]) =>
+    http.route({
+      match: rosterUrl,
+      respond: new Response(
+        collection(
+          'ArrayOfMemberOfParliament',
+          'MemberOfParliament',
+          ids.map((id) => rawPerson(id)),
+        ),
+      ),
+    });
+  const politician = (path: string, extra: Record<string, unknown> = {}) =>
+    http.route({
+      match: `${api}${path}`,
+      respond: Response.json({ url: path, name: 'River Example', ...extra }),
+    });
+  const candidates = (paths: string[], next = false) =>
+    http.route({
+      match: namePage,
+      respond: Response.json({
+        objects: paths.map((url) => ({ url, name: 'River Example' })),
+        pagination: {
+          offset: 0,
+          limit: 4,
+          next_url: next ? namePage.replace('offset=0', 'offset=4') : null,
+        },
+      }),
+    });
+  const call = (input: Record<string, unknown>) =>
+    settle(runToolContract(searchSpeechesTool, { dateFrom: '2026-10-01', ...input }));
+  const urls = () => http.calls.map((c) => c.request.url);
+
+  it('scans by the verified profile when politician is a current personId', async () => {
+    roster(2897);
+    candidates([actor]);
+    politician(actor, { other_info: { parl_mp_id: ['2897'] } });
+    politician('/politicians/2897/', { name: 'Unrelated Candidate' });
+    pages(http, [speech(1)], { politician: actor, time__gte: '2026-10-01' });
+    const data = parity(await call({ politician: ' 2897 ' }), searchSpeechesTool);
+    expect(data).toMatchObject({
+      speeches: [{ id: '1', politician: 'river-example' }],
+      appliedFilters: { politician: 'river-example', politicianName: 'River Example' },
+    });
+    expect(urls().filter((url) => !new URL(url).pathname.startsWith('/speeches/'))).toEqual([
+      rosterUrl,
+      namePage,
+      `${api}${actor}`,
+    ]);
+  });
+  it.each(['/politicians/2897/', 'https://api.openparliament.ca/politicians/2897/'])(
+    'reads politician %j, holding a current personId, through the verified crosswalk',
+    async (input) => {
+      roster(2897);
+      candidates([actor]);
+      politician(actor, { other_info: { parl_mp_id: ['2897'] } });
+      pages(http, [speech(1)], { politician: actor, time__gte: '2026-10-01' });
+      expect(parity(await call({ politician: input }), searchSpeechesTool)).toMatchObject({
+        appliedFilters: { politician: 'river-example', politicianName: 'River Example' },
+      });
+      expect(urls().filter((url) => !new URL(url).pathname.startsWith('/speeches/'))).toEqual([
+        rosterUrl,
+        namePage,
+        `${api}${actor}`,
+      ]);
+    },
+  );
+  it('describes how politician reads a current personId', () => {
+    expect(searchSpeechesTool.input.shape.politician.description).toBe(
+      "Speaker OpenParliament slug or exact politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
+    );
+  });
+  it.each([
+    ['several verified candidates', [actor, '/politicians/river-example-2/'], false],
+    ['a candidate page continuation', [actor], true],
+  ])(
+    'fails speech_entity_not_found for a current personId with %s, before scanning',
+    async (_case, paths, next) => {
+      roster(2897);
+      candidates(paths, next);
+      for (const path of paths) politician(path, { other_info: { parl_mp_id: ['2897'] } });
+      failure(await call({ politician: '2897' }), notFound);
+      expect(urls().filter((url) => url.startsWith(api))).toEqual([
+        namePage,
+        ...(next ? [] : paths.map((path) => `${api}${path}`)),
+      ]);
+    },
+  );
+  it('keeps a numeric politician absent from the roster as an OpenParliament ID, read after the roster', async () => {
+    roster(1);
+    politician('/politicians/5724/', { name: 'Numeric Example' });
+    pages(http, [speech(1, { politician_url: '/politicians/5724/' })], {
+      politician: '/politicians/5724/',
+      time__gte: '2026-10-01',
+    });
+    const data = parity(await call({ politician: '/politicians/5724/' }), searchSpeechesTool);
+    expect(data).toMatchObject({
+      speeches: [{ politician: '5724' }],
+      appliedFilters: { politician: '5724', politicianName: 'Numeric Example' },
+    });
+    expect(urls().slice(0, 2)).toEqual([rosterUrl, `${api}/politicians/5724/`]);
+  });
+  it('fails speech_entity_not_found when a numeric politician answers with another canonical profile', async () => {
+    roster(1);
+    politician('/politicians/413/', { url: actor });
+    failure(await call({ politician: '413' }), notFound);
+    expect(urls().some((url) => new URL(url).pathname === '/speeches/')).toBe(false);
+  });
+  it.each([
+    [
+      { politician: 'river-example' },
+      { politician: 'river-example', politicianName: 'River Example' },
+    ],
+    [{}, { politician: null, politicianName: null }],
+  ])('names the speaker of %j without reading the roster', async (input, applied) => {
+    politician(actor);
+    pages(http, [speech(1)], {
+      ...('politician' in input ? { politician: actor } : {}),
+      time__gte: '2026-10-01',
+    });
+    expect(parity(await call(input), searchSpeechesTool)).toMatchObject({
+      appliedFilters: applied,
+    });
+    expect(urls()).not.toContain(rosterUrl);
   });
 });

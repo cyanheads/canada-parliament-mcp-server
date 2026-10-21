@@ -7,6 +7,7 @@ import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type CallBudget, createRequestContext } from '@/domain/request-context.js';
 import { OpenParliamentService } from '@/services/openparliament/openparliament-service.js';
+import { parsePoliticianProfile } from '@/services/openparliament/parsing.js';
 
 const origin = 'https://api.openparliament.ca';
 const actor = { name: 'Synthetic Member', url: '/politicians/synthetic-member/' };
@@ -171,6 +172,54 @@ describe('OpenParliamentService network contracts', () => {
         settle(operations[kind]?.() ?? Promise.reject(new Error('Missing operation'))),
       ).rejects.toMatchObject({ data: { retryable: false } });
       expect(http.calls).toHaveLength(1);
+    },
+  );
+  it('returns a numeric OpenParliament ID whose profile keeps that ID as its canonical path', async () => {
+    http.route({
+      match: `${origin}/politicians/5724/`,
+      respond: Response.json({ name: 'Numeric Example', url: '/politicians/5724/' }),
+    });
+    expect((await settle(service.getPolitician('5724', budget))).data).toMatchObject({
+      slug: '5724',
+      name: 'Numeric Example',
+      url: 'https://openparliament.ca/politicians/5724/',
+    });
+  });
+  it('classifies a numeric value answered by another profile as not found before parsing that profile', async () => {
+    const other = {
+      name: 'Other Example',
+      url: '/politicians/other-example/',
+      links: [{ url: 'ftp://other.example.test/', note: 'Unusable link' }],
+    };
+    // The body fails profile parsing, so only a check ahead of parsing reaches NotFound.
+    expect(() => parsePoliticianProfile(other)).toThrow(
+      expect.objectContaining({ code: JsonRpcErrorCode.SerializationError }),
+    );
+    http.route({ match: `${origin}/politicians/414/`, respond: Response.json(other) });
+    await expect(settle(service.getPolitician('414', budget))).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { retryable: false },
+    });
+  });
+  it.each([
+    ['413', JsonRpcErrorCode.NotFound],
+    ['/politicians/413/', JsonRpcErrorCode.NotFound],
+    ['https://openparliament.ca/politicians/413/', JsonRpcErrorCode.NotFound],
+    ['synthetic-member', JsonRpcErrorCode.SerializationError],
+  ])(
+    'classifies %j answered by another canonical profile as code %i after one uncached attempt',
+    async (requested, code) => {
+      http.route({
+        match: () => true,
+        respond: () => Response.json({ name: 'Other Example', url: '/politicians/other-example/' }),
+      });
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        await expect(settle(service.getPolitician(requested, budget))).rejects.toMatchObject({
+          code,
+          data: { retryable: false },
+        });
+        expect(http.calls).toHaveLength(attempt);
+      }
     },
   );
   it('rejects malformed request boundaries without making requests', () => {

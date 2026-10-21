@@ -22,7 +22,7 @@ export interface CallBudget extends RequestContext {
 }
 /** Start one 50s call clock with a 45s upstream subdeadline. */
 export function createRequestContext(context: Context): CallBudget {
-  const startedAt = Date.now();
+  const deadlineAt = Date.now() + 45_000;
   const outer = new AbortController();
   const upstream = new AbortController();
   const abortCaller = () =>
@@ -46,8 +46,8 @@ export function createRequestContext(context: Context): CallBudget {
     callerSignal: context.signal,
     outerSignal: outer.signal,
     signal: upstream.signal,
-    deadlineAt: startedAt + 45_000,
-    remainingMs: () => Math.max(0, startedAt + 45_000 - Date.now()),
+    deadlineAt,
+    remainingMs: () => Math.max(0, deadlineAt - Date.now()),
     throwIfOuterAborted: () => {
       outer.signal.throwIfAborted();
     },

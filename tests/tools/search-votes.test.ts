@@ -2,7 +2,9 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { VOTE_DOCUMENT_TYPES } from '@/domain/reference-catalog.js';
 import { searchVotesTool } from '@/mcp-server/tools/definitions/search-votes.tool.js';
+import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
 import {
   current,
   failure,
@@ -124,16 +126,73 @@ describe('canparl_search_votes production contract', () => {
     const result = await call({ session: '45-1', limit: 100 });
     parity(result, searchVotesTool);
     expect(result.structuredContent).toMatchObject({ total: 100, shown: 100, truncated: false });
+    expect(result.structuredContent).not.toHaveProperty('notice');
   });
-  it.each([
-    { billCode: 'C-0' },
-    { result: 'Imaginary' },
-    { documentType: 'Imaginary' },
-    { dateFrom: '2026-02-30' },
-    { dateFrom: '2026-10-20', dateTo: '2026-10-19' },
-    { dateTo: '2026-13-01' },
-    { session: '35-2' },
-  ])('returns declared reason and recovery for %j', async (input) => {
+  it.each([101, 10_000])(
+    'clamps limit %i to the 100-row cap and continues from nextOffset',
+    async (limit) => {
+      votes(
+        http,
+        Array.from({ length: 150 }, (_, i) => rawVote(i + 1)),
+      );
+      const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
+      const first = parity(await call({ session: '45-1', limit }), searchVotesTool);
+      expect(first).toMatchObject({
+        total: 150,
+        shown: 100,
+        cap: 100,
+        truncated: true,
+        pagination: { offset: 0, limit: 100, nextOffset: 100, hasMore: true },
+        notice,
+      });
+      expect((first.divisions as { number: number }[]).at(-1)?.number).toBe(51);
+      const rest = parity(await call({ session: '45-1', limit, offset: 100 }), searchVotesTool);
+      expect(rest).toMatchObject({
+        shown: 50,
+        cap: 100,
+        truncated: false,
+        pagination: { offset: 100, limit: 100, nextOffset: null, hasMore: false },
+        notice,
+      });
+    },
+  );
+  const bill = 'Expected a House or Senate bill code such as C-15';
+  const date = 'Expected a real calendar date written YYYY-MM-DD';
+  it.each<[Record<string, string>, FilterRejection]>([
+    [{ billCode: 'C-0' }, { field: 'billCode', rejected: 'C-0', shape: bill }],
+    [{ billCode: 'C - 2' }, { field: 'billCode', rejected: 'C - 2', shape: bill }],
+    [
+      { result: 'Imaginary' },
+      {
+        field: 'result',
+        rejected: 'Imaginary',
+        allowed: ['Agreed To', 'Negatived', 'Tie', 'Historical result', 'Passed', 'Failed'],
+      },
+    ],
+    [
+      { documentType: 'Imaginary' },
+      {
+        field: 'documentType',
+        rejected: 'Imaginary',
+        allowed: [...VOTE_DOCUMENT_TYPES, 'Historical category'],
+      },
+    ],
+    [{ dateFrom: '2026-02-30' }, { field: 'dateFrom', rejected: '2026-02-30', shape: date }],
+    [
+      { dateFrom: '2026-10-20', dateTo: '2026-10-19' },
+      { field: 'dateFrom', rejected: '2026-10-2', shape: 'Expected a date no later than dateTo' },
+    ],
+    [{ dateTo: '2026-13-01' }, { field: 'dateTo', rejected: '2026-13-01', shape: date }],
+    [
+      { session: '35-2' },
+      {
+        field: 'session',
+        rejected: '35-2',
+        allowed: ['45-1', '38-1', '46-2'],
+        shape: 'Expected a session in the official House division session index',
+      },
+    ],
+  ])('returns declared reason and recovery for %j', async (input, expected) => {
     votes(http, rows);
     const reason =
       'session' in input
@@ -141,14 +200,43 @@ describe('canparl_search_votes production contract', () => {
         : 'dateFrom' in input || 'dateTo' in input
           ? 'invalid_date_range'
           : 'invalid_vote_filter';
-    failure(
-      await call({ session: '45-1', ...input }),
-      searchVotesTool.errors!.find((error) => error.reason === reason)!,
-    );
+    const result = await call({ session: '45-1', ...input });
+    failure(result, searchVotesTool.errors!.find((error) => error.reason === reason)!);
+    assertFilterRejection(result, expected);
+  });
+  it.each(['45-0', '9007199254740992-1'])(
+    'rejects malformed session %j as unsupported_vote_session before HTTP',
+    async (session) => {
+      const result = await call({ session });
+      failure(
+        result,
+        searchVotesTool.errors!.find((error) => error.reason === 'unsupported_vote_session')!,
+      );
+      assertFilterRejection(result, {
+        field: 'session',
+        rejected: session,
+        shape: 'Expected a parliament-session token such as 45-1',
+      });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+  it('accepts a separated bill code as its canonical filter', async () => {
+    votes(http, rows);
+    const data = parity(await call({ session: '45-1', billCode: 'S‑321' }), searchVotesTool);
+    expect(data).toMatchObject({ total: 3, appliedFilters: { billCode: 'S-321' } });
+  });
+  it('filters a split-bill division by its suffixed code', async () => {
+    votes(http, [...rows, rawVote(11, { BillNumberCode: 'C-15A' })]);
+    const data = parity(await call({ session: '45-1', billCode: 'c 15a' }), searchVotesTool);
+    expect(data).toMatchObject({
+      total: 1,
+      divisions: [{ number: 11, billCode: 'C-15A' }],
+      appliedFilters: { billCode: 'C-15A' },
+    });
   });
   it.each([
     { limit: 0 },
-    { limit: 101 },
+    { limit: 10_001 },
     { offset: -1 },
     { session: { parliament: 0, session: 1 } },
   ])('rejects invalid schema input before HTTP %j', async (input) => {

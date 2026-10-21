@@ -4,6 +4,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
+import { assertFilterRejection } from '../fixtures/filter-rejection.js';
 import {
   collection,
   current,
@@ -144,8 +145,61 @@ describe('canparl_list_reference production contract', () => {
   ])('returns topic-specific session recovery for %j', async (input) => {
     const reason =
       input.topic === 'sessions' ? 'incompatible_reference_session' : 'unknown_reference_session';
-    failure(await call(input), listReferenceTool.errors!.find((error) => error.reason === reason)!);
+    const result = await call(input);
+    failure(result, listReferenceTool.errors!.find((error) => error.reason === reason)!);
+    if (input.topic === 'sessions') return;
+    const votesIndex = input.topic.startsWith('vote_');
+    assertFilterRejection(result, {
+      field: 'session',
+      rejected: input.session,
+      allowed: votesIndex ? ['45-1', '38-1', '46-2'] : ['45-1', '38-1', '35-2'],
+      shape: votesIndex
+        ? 'Expected a session in the official House division session index'
+        : 'Expected a session in the official bill session index',
+    });
   });
+  it.each([
+    ['bill_types', '45-0'],
+    ['vote_results', '45-0'],
+    ['sessions', '45-0'],
+    ['parties', '9007199254740992-1'],
+  ])(
+    'rejects malformed %s session %j as unknown_reference_session before HTTP',
+    async (topic, session) => {
+      const result = await call({ topic, session });
+      failure(
+        result,
+        listReferenceTool.errors!.find((error) => error.reason === 'unknown_reference_session')!,
+      );
+      assertFilterRejection(result, {
+        field: 'session',
+        rejected: session,
+        shape: 'Expected a parliament-session token such as 45-1',
+      });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+  it.each(['bill_types', 'bill_statuses'])(
+    'lists %s for a session holding a split bill beside its base code',
+    async (topic) => {
+      const historical = { ParliamentNumber: 38, SessionNumber: 1, IsSessionOngoing: false };
+      http.route({
+        match: listing('38-1'),
+        respond: Response.json([
+          rawBill('C-333', historical),
+          rawBill('C-333A', { ...historical, StatusNameEn: 'Synthetic split status' }),
+        ]),
+      });
+      const data = parity(await call({ topic, session: '38-1' }), listReferenceTool);
+      expect(data).toMatchObject({ session: '38-1', appliedFilters: { topic, session: '38-1' } });
+      if (topic === 'bill_statuses')
+        expect(
+          (data.entries as { value: string; observed: boolean | null }[]).find(
+            (entry) => entry.value === 'Synthetic split status',
+          ),
+        ).toMatchObject({ observed: true });
+    },
+  );
   it.each([{ topic: 'unknown' }, { topic: 'sessions', session: { parliament: 0, session: 1 } }])(
     'rejects invalid schema input before HTTP %j',
     async (input) => {

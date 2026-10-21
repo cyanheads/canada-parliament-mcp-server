@@ -5,15 +5,18 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  clampCount,
+  filterFailure,
   includesText,
+  normalizeFilter,
   normalizeProvince,
   normalizeVocabulary,
   paginate,
-  vocabularyKey,
 } from '@/domain/normalization.js';
 import { extendVocabulary, OFFICIAL_PARTY_ALIASES, PARTIES } from '@/domain/reference-catalog.js';
 import { createRequestContext } from '@/domain/request-context.js';
 import {
+  LIST_CAP,
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
@@ -111,9 +114,12 @@ export const searchMembersTool = tool('canparl_search_members', {
       .strict()
       .describe('Normalized AND filters and name semantics.'),
     shown: z.number().int().describe('Returned row count.'),
-    cap: z.number().int().describe('Requested page limit.'),
+    cap: z.number().int().describe('Effective page limit after the per-call cap.'),
     truncated: z.boolean().describe('More queried rows remain.'),
-    notice: z.string().optional().describe('Empty page or historical coverage guidance.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Limit clamp, empty page, or historical coverage guidance.'),
   },
   enrichmentTrailer: {
     appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
@@ -141,12 +147,14 @@ export const searchMembersTool = tool('canparl_search_members', {
     try {
       if (input.includeFormer && (input.riding || input.province || input.party))
         throw ctx.fail('unsupported_historical_filter');
+      const limit = clampCount('limit', input.limit, LIST_CAP);
+      const notices: string[] = limit.notice ? [limit.notice] : [];
       if (input.includeFormer) {
         const nameMode = input.name ? (/\s/u.test(input.name) ? 'full_name' : 'surname') : 'index';
         const page = await getOpenParliamentService().listPoliticians(
           {
             include: 'all',
-            limit: input.limit,
+            limit: limit.value,
             offset: input.offset,
             ...(nameMode === 'surname' && input.name
               ? { familyName: input.name }
@@ -177,22 +185,23 @@ export const searchMembersTool = tool('canparl_search_members', {
             party: null,
           },
           shown: members.length,
-          cap: input.limit,
+          cap: limit.value,
           truncated: page.nextOffset !== null,
         });
         if (!members.length)
-          ctx.enrich.notice(
+          notices.push(
             input.offset
               ? 'Retry canparl_search_members with offset 0 and the same filters.'
               : 'Try a surname alone or the full recorded name with canparl_search_members includeFormer true.',
           );
+        if (notices.length) ctx.enrich.notice(notices.join(' '));
         request.throwIfAborted();
         return {
           total: null,
           members,
           pagination: {
             offset: input.offset,
-            limit: input.limit,
+            limit: limit.value,
             nextOffset: page.nextOffset,
             hasMore: page.nextOffset !== null,
           },
@@ -203,21 +212,16 @@ export const searchMembersTool = tool('canparl_search_members', {
       let province: string | undefined;
       let party: string | undefined;
       try {
-        province = input.province ? normalizeProvince(input.province) : undefined;
-        const alias = Object.entries(OFFICIAL_PARTY_ALIASES).find(
-          ([key]) => vocabularyKey(key) === vocabularyKey(input.party ?? ''),
-        )?.[1];
-        party = input.party
-          ? normalizeVocabulary(
-              alias ?? input.party,
-              extendVocabulary(
-                PARTIES,
-                roster.data.map((row) => row.party),
-              ),
-            )
-          : undefined;
-      } catch {
-        throw ctx.fail('invalid_member_filter');
+        province = normalizeFilter('province', input.province, normalizeProvince);
+        const parties = extendVocabulary(
+          PARTIES,
+          roster.data.map((row) => row.party),
+        );
+        party = normalizeFilter('party', input.party, (value) =>
+          normalizeVocabulary(value, parties, OFFICIAL_PARTY_ALIASES),
+        );
+      } catch (error) {
+        throw ctx.fail('invalid_member_filter', ...filterFailure(error));
       }
       const rows = roster.data
         .filter(
@@ -233,7 +237,7 @@ export const searchMembersTool = tool('canparl_search_members', {
             a.firstName.localeCompare(b.firstName, 'en-CA') ||
             a.personId.localeCompare(b.personId),
         );
-      const page = paginate(rows, input.offset, input.limit);
+      const page = paginate(rows, input.offset, limit.value);
       const members = page.items.map(({ firstName: _first, lastName: _last, ...member }) => member);
       ctx.enrich({
         appliedFilters: {
@@ -245,16 +249,17 @@ export const searchMembersTool = tool('canparl_search_members', {
           party: party ?? null,
         },
         shown: members.length,
-        cap: input.limit,
+        cap: limit.value,
         truncated: page.pagination.hasMore,
       });
       ctx.enrich.total(page.total);
       if (!members.length)
-        ctx.enrich.notice(
+        notices.push(
           input.offset && page.total
             ? 'Retry canparl_search_members with offset 0 and the same filters.'
             : 'No MPs matched; broaden name or riding and retry canparl_search_members.',
         );
+      if (notices.length) ctx.enrich.notice(notices.join(' '));
       request.throwIfAborted();
       return {
         total: page.total,

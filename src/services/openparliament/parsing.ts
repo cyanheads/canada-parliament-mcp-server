@@ -3,16 +3,16 @@
  * @module services/openparliament/parsing
  */
 import { serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { parseHTML } from 'linkedom';
+import { htmlToText } from '@/domain/html-to-text.js';
 import {
   assertRepresentableText,
   normalizeDate,
   normalizeProvince,
 } from '@/domain/normalization.js';
+import type { BilingualText } from '@/domain/schemas.js';
 import type {
   Ballot,
   BallotValue,
-  BilingualText,
   Bill,
   Membership,
   Politician,
@@ -24,6 +24,10 @@ import type {
 /** Fixed request origin; returned public links use the public website. */
 export const API_ORIGIN = 'https://api.openparliament.ca';
 const PUBLIC_ORIGIN = 'https://openparliament.ca';
+const POLITICIAN_PATH = /^\/politicians\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/;
+const MEMBERSHIP_PATH = /^\/politicians\/memberships\/[1-9]\d*\/$/;
+const VOTE_PATH = /^\/votes\/[1-9]\d*-[1-9]\d*\/[1-9]\d*\/$/;
+const DOCUMENT_PATH = /^\/(?:debates|committees)\/[a-zA-Z0-9/_.-]+\/$/;
 type RecordValue = Record<string, unknown>;
 /** Deterministic upstream mismatches never enter a retry ladder. */
 export function malformed(field: string): never {
@@ -99,15 +103,16 @@ export function sourcePath(value: unknown, pattern: RegExp, field = 'url'): stri
 }
 /** Canonical actor path, used only after an identifier has been validated. */
 export function politicianPath(value: unknown): string {
-  return sourcePath(value, /^\/politicians\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/, 'politician');
+  return sourcePath(value, POLITICIAN_PATH, 'politician');
 }
 /** Canonical historical membership path. */
 export function membershipPath(value: unknown): string {
-  return sourcePath(value, /^\/politicians\/memberships\/[1-9]\d*\/$/, 'membership');
+  return sourcePath(value, MEMBERSHIP_PATH, 'membership');
 }
 function optionalPath(value: unknown, pattern: RegExp): string | null {
   return value == null ? null : `${PUBLIC_ORIGIN}${sourcePath(value, pattern)}`;
 }
+/** Image reference or non-absolute profile link: resolved against the public site, HTTPS only. */
 function publicLink(value: unknown): string {
   const raw = requiredText(value, 'link');
   let url: URL;
@@ -118,6 +123,19 @@ function publicLink(value: unknown): string {
   }
   if (url.protocol !== 'https:' || url.username || url.password) return malformed('link');
   return url.href;
+}
+/**
+ * Profile link, never fetched: an absolute HTTP or HTTPS URL without credentials is relayed exactly
+ * as published; any other non-empty value takes the {@link publicLink} rule. Other absolute schemes
+ * and credentials are malformed.
+ */
+function profileLink(value: unknown): string {
+  const raw = requiredText(value, 'link');
+  const url = URL.parse(raw);
+  if (!url) return publicLink(raw);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+    return malformed('link');
+  return raw;
 }
 /** Parse JSON without repairing partial payloads. HTML failures are transient. */
 export function parseJson(body: string): unknown {
@@ -209,7 +227,7 @@ export function parseMembership(value: unknown): Membership {
     startDate: date(raw.start_date),
     endDate: date(raw.end_date),
     label: english(raw.label),
-    politicianUrl: optionalPath(raw.politician_url, /^\/politicians\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/),
+    politicianUrl: optionalPath(raw.politician_url, POLITICIAN_PATH),
   };
 }
 /** Profile parsing intentionally excludes contact details. */
@@ -239,14 +257,14 @@ export function parsePoliticianProfile(value: unknown): PoliticianProfile {
         ? []
         : (raw.links as unknown[]).map((value) => {
             const link = record(value);
-            return { url: publicLink(link.url), note: text(link.note) };
+            return { url: profileLink(link.url), note: text(link.note) };
           }),
   };
 }
 /** Bill list and detail use the same identity, with absent list status kept null. */
 export function parseBill(value: unknown): Bill {
   const raw = record(value);
-  const path = sourcePath(raw.url, /^\/bills\/[1-9]\d*-[1-9]\d*\/[CS]-[1-9]\d*\/$/);
+  const path = sourcePath(raw.url, /^\/bills\/[1-9]\d*-[1-9]\d*\/[CS]-[1-9]\d*[A-Z]?\/$/);
   const session = requiredText(raw.session, 'session');
   const billCode = requiredText(raw.number, 'number');
   if (path !== `/bills/${session}/${billCode}/`) return malformed('bill.identity');
@@ -275,18 +293,15 @@ export function parseBallot(value: unknown): Ballot {
   if (!['Yes', 'No', 'Paired', "Didn't vote"].includes(ballot)) return malformed('ballot');
   return {
     ballot: ballot as BallotValue,
-    voteUrl: `${PUBLIC_ORIGIN}${sourcePath(raw.vote_url, /^\/votes\/[1-9]\d*-[1-9]\d*\/[1-9]\d*\/$/)}`,
+    voteUrl: `${PUBLIC_ORIGIN}${sourcePath(raw.vote_url, VOTE_PATH)}`,
     politicianUrl: `${PUBLIC_ORIGIN}${politicianPath(raw.politician_url)}`,
-    membershipUrl: optionalPath(
-      raw.politician_membership_url,
-      /^\/politicians\/memberships\/[1-9]\d*\/$/,
-    ),
+    membershipUrl: optionalPath(raw.politician_membership_url, MEMBERSHIP_PATH),
   };
 }
 /** Vote identity must agree with its source path. */
 export function parseVote(value: unknown): Vote {
   const raw = record(value);
-  const path = sourcePath(raw.url, /^\/votes\/[1-9]\d*-[1-9]\d*\/[1-9]\d*\/$/);
+  const path = sourcePath(raw.url, VOTE_PATH);
   const session = requiredText(raw.session, 'session');
   const number = raw.number;
   if (
@@ -305,51 +320,14 @@ export function parseVote(value: unknown): Vote {
     url: `${PUBLIC_ORIGIN}${path}`,
   };
 }
-/** Convert source HTML to complete decoded prose, retaining paragraph and hard breaks. */
-export function htmlToText(html: string): string {
-  const { document } = parseHTML('<html><body></body></html>');
-  const container = document.createElement('div');
-  container.innerHTML = html;
-  type HtmlNode = {
-    nodeType: number;
-    nodeName: string;
-    textContent: string | null;
-    childNodes: ArrayLike<HtmlNode>;
-  };
-  const blocks = new Set(['p', 'div', 'blockquote', 'li', 'section', 'h1', 'h2', 'h3', 'tr']);
-  function visit(node: HtmlNode): string {
-    if (node.nodeType === 3) return node.textContent ?? '';
-    const name = node.nodeName.toLowerCase();
-    if (name === 'br') return '\n';
-    const children = Array.from(node.childNodes);
-    const content = children
-      .map((child, index) => {
-        const adjacentBlock = [children[index - 1], children[index + 1]].some(
-          (sibling) => sibling && blocks.has(sibling.nodeName.toLowerCase()),
-        );
-        if (child.nodeType === 3 && /^\s*$/.test(child.textContent ?? '') && adjacentBlock)
-          return '';
-        return visit(child);
-      })
-      .join('');
-    return node !== container && blocks.has(name) ? `${content}\n\n` : content;
-  }
-  const rendered = visit(container);
-  const last = Array.from((container as HtmlNode).childNodes).findLast(
-    (node) => node.nodeType !== 3 || !/^\s*$/.test(node.textContent ?? ''),
-  );
-  const result =
-    last && blocks.has(last.nodeName.toLowerCase()) ? rendered.replace(/\n\n$/, '') : rendered;
-  assertRepresentableText(result);
-  return result;
-}
 /** Candidate speech parser; committee exclusion belongs to the bounded tool scan. */
 export function parseSpeech(value: unknown): Speech {
   const raw = record(value);
-  const path = sourcePath(raw.url, /^\/(?:debates|committees)\/[a-zA-Z0-9/_.-]+\/$/);
+  const path = sourcePath(raw.url, DOCUMENT_PATH);
   const content = english(raw.content);
   const actor = raw.politician_url == null ? null : politicianPath(raw.politician_url);
-  if (raw.procedural != null && typeof raw.procedural !== 'boolean') return malformed('procedural');
+  const { procedural } = raw;
+  if (procedural != null && typeof procedural !== 'boolean') return malformed('procedural');
   const time = requiredText(raw.time, 'time');
   if (!/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(time)) return malformed('time');
   date(time.slice(0, 10));
@@ -358,16 +336,13 @@ export function parseSpeech(value: unknown): Speech {
     id,
     speaker: english(raw.attribution),
     politician: actor?.split('/')[2] ?? null,
-    membershipUrl: optionalPath(
-      raw.politician_membership_url,
-      /^\/politicians\/memberships\/[1-9]\d*\/$/,
-    ),
+    membershipUrl: optionalPath(raw.politician_membership_url, MEMBERSHIP_PATH),
     time,
     h1: english(raw.h1),
     h2: english(raw.h2),
     content: content === null ? null : htmlToText(content),
-    procedural: raw.procedural == null ? null : (raw.procedural as boolean),
+    procedural: procedural ?? null,
     url: `${PUBLIC_ORIGIN}${path}`,
-    debateUrl: optionalPath(raw.document_url, /^\/(?:debates|committees)\/[a-zA-Z0-9/_.-]+\/$/),
+    debateUrl: optionalPath(raw.document_url, DOCUMENT_PATH),
   };
 }

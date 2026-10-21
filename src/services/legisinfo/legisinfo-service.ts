@@ -10,9 +10,15 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
-import { normalizeBillCode, normalizeSession } from '@/domain/normalization.js';
+import {
+  filterFailure,
+  normalizeBillCode,
+  normalizeFilter,
+  normalizeSession,
+  rejectSession,
+} from '@/domain/normalization.js';
 import type { RequestContext } from '@/domain/request-context.js';
-import type { Source } from '@/domain/schemas.js';
+import type { SessionInput, Source, SourceResult } from '@/domain/schemas.js';
 import {
   billIdentity,
   invalidResponse,
@@ -22,18 +28,28 @@ import {
   parseCurrentSession,
   parseSessions,
 } from './parsing.js';
-import type { BillDossier, BillSummary, LegisinfoSession, SourceResult } from './types.js';
+import type { BillDossier, BillSummary, LegisinfoSession } from './types.js';
 
 const ORIGIN = 'https://www.parl.ca';
 const FIVE_MINUTES = 300_000;
+const UNKNOWN_SESSION = { reason: 'unknown_session', retryable: false };
 interface CacheEntry {
   data: unknown;
   expiresAt: number;
   source: Source;
 }
+/** Canonical session token, or a field-named `unknown_session` rejection naming the expected shape. */
+function sessionToken(value: Exclude<SessionInput, undefined>): string {
+  try {
+    return normalizeFilter('session', value, (session) => normalizeSession(session));
+  } catch (error) {
+    const [message, data, options] = filterFailure(error);
+    throw validationError(message, { ...UNKNOWN_SESSION, ...data }, options);
+  }
+}
 
 /** Official source service; each operation uses its caller's existing request budget. */
-export class LegisinfoService implements Disposable {
+export class LegisinfoService {
   private readonly pacer = createPacer({
     name: 'legisinfo',
     maxConcurrent: 2,
@@ -88,6 +104,15 @@ export class LegisinfoService implements Disposable {
     return result;
   }
 
+  /** Canonicalize a supplied session, or resolve an omitted one as the verified current session. */
+  async resolveSession(
+    value: SessionInput,
+    request: RequestContext,
+  ): Promise<SourceResult<string>> {
+    if (value === undefined) return await this.getCurrentSession(request);
+    return { data: sessionToken(value), provenance: [] };
+  }
+
   /** Retrieve and validate the entire known official session before local filtering. */
   async listBills(session: string, request: RequestContext): Promise<SourceResult<BillSummary[]>> {
     const verified = await this.verifySession(session, request);
@@ -118,12 +143,14 @@ export class LegisinfoService implements Disposable {
   ): Promise<SourceResult<BillDossier>> {
     let code: string;
     try {
-      code = normalizeBillCode(billCode);
-    } catch {
-      throw validationError('Invalid bill code.', {
-        reason: 'invalid_bill_code',
-        retryable: false,
-      });
+      code = normalizeFilter('billCode', billCode, normalizeBillCode);
+    } catch (error) {
+      const [message, data, options] = filterFailure(error);
+      throw validationError(
+        message,
+        { reason: 'invalid_bill_code', retryable: false, ...data },
+        options,
+      );
     }
     const verified = await this.verifySession(session, request);
     const result = await this.load(
@@ -140,26 +167,15 @@ export class LegisinfoService implements Disposable {
     session: string,
     request: RequestContext,
   ): Promise<SourceResult<string>> {
-    let token: string | undefined;
-    try {
-      token = normalizeSession(session);
-    } catch {
-      throw validationError('Unsupported official bill session.', {
-        reason: 'unknown_session',
-        retryable: false,
-      });
-    }
-    if (!token)
-      throw validationError('An official bill session is required.', {
-        reason: 'unknown_session',
-        retryable: false,
-      });
+    const token = sessionToken(session);
     const sessions = await this.getSessions(request);
     if (!sessions.data.some((entry) => entry.session === token))
-      throw validationError('Unsupported official bill session.', {
-        reason: 'unknown_session',
-        retryable: false,
-      });
+      throw rejectSession(
+        'session',
+        'official bill',
+        sessions.data.map((entry) => entry.session),
+        UNKNOWN_SESSION,
+      );
     return { data: token, provenance: sessions.provenance };
   }
 
@@ -187,7 +203,7 @@ export class LegisinfoService implements Disposable {
               request.throwIfAborted();
               const body = await this.fetchText(
                 url,
-                Math.min(Date.now() + 10_000, Date.now() + attempt.remainingMs),
+                Date.now() + Math.min(10_000, attempt.remainingMs),
                 attempt.signal,
                 request,
                 billDetail,
@@ -320,10 +336,6 @@ export class LegisinfoService implements Disposable {
     this.cache.clear();
     this.verifiedCurrent = undefined;
     this.currentSource = undefined;
-  }
-  /** Explicit resource-management lifecycle. */
-  [Symbol.dispose](): void {
-    this.dispose();
   }
 }
 

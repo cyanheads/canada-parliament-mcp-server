@@ -2,13 +2,10 @@
  * @fileoverview Parsed official LEGISinfo bill and session contracts.
  * @module services/legisinfo/types
  */
-import type { JsonRecord, Source } from '@/domain/schemas.js';
+import type { BilingualText, JsonRecord } from '@/domain/schemas.js';
 
-/** Source-preserving bilingual text. */
-export interface BilingualText {
-  en: string | null;
-  fr: string | null;
-}
+/** Canonical chamber; `House of Commons` and organization ID 1 are House, ID 2 is Senate. */
+export type Chamber = 'House' | 'Senate';
 /** A session advertised by the official picker. */
 export interface LegisinfoSession {
   coverage: 'basic' | 'full';
@@ -16,18 +13,13 @@ export interface LegisinfoSession {
   session: string;
   sessionNumber: number;
 }
-/** Parsed result with retrieval provenance. */
-export interface SourceResult<T> {
-  data: T;
-  provenance: Source[];
-}
 /** Official bill summary, independent of third-party indexing. */
 export interface BillSummary {
   billCode: string;
   billType: string | null;
-  latestMajorStage: { name: string | null; chamber: string | null } | null;
+  latestMajorStage: { name: string | null; chamber: Chamber | null } | null;
   longTitle: BilingualText;
-  originatingChamber: 'House' | 'Senate' | null;
+  originatingChamber: Chamber | null;
   royalAssentDate: string | null;
   session: string;
   shortTitle: BilingualText;
@@ -36,7 +28,7 @@ export interface BillSummary {
 }
 /** Official stage, retaining variable decisions and events verbatim. */
 export interface Stage {
-  chamber: 'House' | 'Senate' | null;
+  chamber: Chamber | null;
   committee: { id: number | null; acronym: string | null; name: BilingualText } | null;
   committeeMeetings:
     | {
@@ -83,19 +75,40 @@ export interface Publication {
   typeId: number | null;
   url: string;
 }
+/** Related document, press release, or costing note; URL values are relayed, never fetched. */
+export interface WebReference {
+  title: BilingualText;
+  type: BilingualText;
+  typeId: number | null;
+  url: BilingualText;
+}
+/** Reading date-times as UTC instants; royal assent is `BillSummary.royalAssentDate`. */
+export interface BillMilestones {
+  houseFirstReading: string | null;
+  houseSecondReading: string | null;
+  houseThirdReading: string | null;
+  senateFirstReading: string | null;
+  senateSecondReading: string | null;
+  senateThirdReading: string | null;
+}
 /** Complete normalized official dossier. */
 export interface BillDossier {
   bill: BillSummary;
   divisions: BillDivision[] | null;
+  milestones: BillMilestones;
+  /** Plain text; each link keeps its target as `text (href)`. */
+  notes: BilingualText;
   publications: Publication[] | null;
   senateVoteDetails: JsonRecord[] | null;
-  sponsor: { name: string | null; personId: string | null; riding: string | null };
+  sponsor: {
+    name: string | null;
+    personId: string | null;
+    riding: string | null;
+    title: BilingualText;
+  };
   stages: { house: Stage[] | null; senate: Stage[] | null; royalAssent: Stage[] | null };
   statute: { year: number; chapter: string; citation: string } | null;
+  /** Library of Parliament legislative summary as plain text. */
+  summary: BilingualText;
+  webReferences: WebReference[] | null;
 }
-/** Domain failures consumed by tool error contracts. */
-export type LegisinfoReason =
-  | 'unknown_session'
-  | 'invalid_bill_code'
-  | 'bill_not_found'
-  | 'upstream_response_invalid';

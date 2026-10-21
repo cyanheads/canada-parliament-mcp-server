@@ -2,11 +2,14 @@
  * @fileoverview Source-independent input and lossless value schema tests.
  * @module tests/domain/schemas.test
  */
+import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
   BilingualTextSchema,
+  COUNT_CEILING,
   JsonRecordSchema,
   JsonValueSchema,
+  LIST_CAP,
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
@@ -43,12 +46,22 @@ describe('shared schemas', () => {
   it('enforces list defaults and inclusive boundaries', () => {
     expect(LimitSchema.parse(undefined)).toBe(25);
     expect(OffsetSchema.parse(undefined)).toBe(0);
-    for (const value of [1, 100]) expect(LimitSchema.parse(value)).toBe(value);
-    for (const value of [0, 101, 1.5, '25', null])
+    for (const value of [1, 100, 101, 10_000]) expect(LimitSchema.parse(value)).toBe(value);
+    for (const value of [0, 10_001, 1.5, '25', null])
       expect(LimitSchema.safeParse(value).success).toBe(false);
     for (const value of [-1, 0.5, '0', null])
       expect(OffsetSchema.safeParse(value).success).toBe(false);
     expect(OffsetSchema.parse(999)).toBe(999);
+  });
+  it('advertises the shared count ceiling above the list cap', () => {
+    expect([LIST_CAP, COUNT_CEILING]).toEqual([100, 10_000]);
+    expect(z.toJSONSchema(LimitSchema)).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: COUNT_CEILING,
+      default: 25,
+      description: `Maximum returned rows, 1–${LIST_CAP} per call; larger values up to ${COUNT_CEILING} return ${LIST_CAP} rows with a notice.`,
+    });
   });
   it('retains nested unknown fields, arrays, nulls, and untranslated text', () => {
     const record = {

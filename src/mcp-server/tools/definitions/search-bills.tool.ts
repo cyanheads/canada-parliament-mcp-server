@@ -3,12 +3,14 @@
  * @module mcp-server/tools/definitions/search-bills.tool
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
+  clampCount,
+  filterFailure,
   includesText,
   normalizeBillCode,
   normalizeChamber,
-  normalizeSession,
+  normalizeFilter,
   normalizeSlug,
   normalizeVocabulary,
   paginate,
@@ -16,6 +18,7 @@ import {
 import { BILL_STATUSES, BILL_TYPES, extendVocabulary } from '@/domain/reference-catalog.js';
 import { createRequestContext } from '@/domain/request-context.js';
 import {
+  LIST_CAP,
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
@@ -26,6 +29,7 @@ import {
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
 import { getOpenParliamentService } from '@/services/openparliament/index.js';
 import { formatResult, renderValue } from './_format.js';
+import { resolvePolitician } from './_member-identity.js';
 import { BillSummarySchema } from './get-bill.tool.js';
 
 /** Find official bills after applying all filters to the complete selected session. */
@@ -39,7 +43,9 @@ export const searchBillsTool = tool('canparl_search_bills', {
     titleContains: OptionalStringSchema.describe(
       'Literal case-insensitive substring of any English or French long or short title.',
     ),
-    billCode: OptionalStringSchema.describe('Exact bill code; accepts bill s321, S321, or S-321.'),
+    billCode: OptionalStringSchema.describe(
+      'Exact bill code, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
+    ),
     originatingChamber: OptionalStringSchema.describe(
       'House, House of Commons, or Senate; case-insensitive.',
     ),
@@ -50,7 +56,7 @@ export const searchBillsTool = tool('canparl_search_bills', {
       'Official bill status from canparl_list_reference topic bill_statuses.',
     ),
     sponsor: OptionalStringSchema.describe(
-      'Verified MP OpenParliament slug or politician path/HTTPS URL from canparl_search_members; Senators are not indexed.',
+      "MP OpenParliament slug or politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId; Senators are not indexed. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
     ),
     limit: LimitSchema,
     offset: OffsetSchema,
@@ -64,7 +70,9 @@ export const searchBillsTool = tool('canparl_search_bills', {
       .describe('Exact matching count after all filters and before pagination.'),
     bills: z
       .array(BillSummarySchema)
-      .describe('Matching official bills ordered by chamber prefix then numeric code.'),
+      .describe(
+        'Matching official bills ordered by chamber prefix, number, then split-bill suffix letter.',
+      ),
     pagination: PaginationSchema.describe('Local continuation in the filtered ordering.'),
     sponsorCoverage: z
       .enum(['not_applied', 'openparliament_index'])
@@ -89,14 +97,21 @@ export const searchBillsTool = tool('canparl_search_bills', {
           .string()
           .nullable()
           .describe('Verified canonical OpenParliament sponsor slug, or null.'),
+        sponsorName: z
+          .string()
+          .nullable()
+          .describe('Name on the verified OpenParliament sponsor profile, or null.'),
       })
       .strict()
       .describe('Normalized filters applied together with AND.'),
     totalCount: z.number().int().nonnegative().describe('Exact matching count before slicing.'),
     shown: z.number().int().nonnegative().describe('Number of bills in this page.'),
-    cap: z.number().int().positive().describe('Requested page limit.'),
+    cap: z.number().int().positive().describe('Effective page limit after the per-call cap.'),
     truncated: z.boolean().describe('Whether more matching bills remain after this page.'),
-    notice: z.string().optional().describe('Coverage, empty-result, or past-end guidance.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Limit clamp, coverage, empty-result, or past-end guidance.'),
   },
   enrichmentTrailer: {
     appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
@@ -105,7 +120,7 @@ export const searchBillsTool = tool('canparl_search_bills', {
     {
       reason: 'unknown_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Session absent from the official bill session index.',
+      when: 'Session malformed or absent from the official bill session index.',
       recovery: 'Call canparl_list_reference with topic sessions and choose a listed bill session.',
       retryable: false,
       thrownBy: 'service',
@@ -113,16 +128,17 @@ export const searchBillsTool = tool('canparl_search_bills', {
     {
       reason: 'invalid_bill_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Malformed bill code or chamber, or unrecognized type or status.',
+      when: 'Malformed bill code, chamber, or sponsor slug, or unrecognized type or status.',
       recovery:
-        'Call canparl_list_reference with topic bill_types or bill_statuses, then retry canparl_search_bills with a listed value.',
+        "Retry canparl_search_bills with a value or shape the error names; canparl_list_reference topics bill_types and bill_statuses list types and statuses, and a sponsor is member.slug from canparl_get_member, a slug from an includeFormer canparl_search_members row, or a current MP's personId.",
       retryable: false,
     },
     {
       reason: 'sponsor_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Supplied sponsor slug has no profile.',
-      recovery: 'Call canparl_search_members with a name and use its verified OpenParliament slug.',
+      when: 'Sponsor slug has no profile of its own, or a current personId has no unique verified OpenParliament profile.',
+      recovery:
+        'Call canparl_search_members with includeFormer true and a surname or full name, then pass a returned slug as sponsor.',
       retryable: false,
     },
     {
@@ -137,59 +153,50 @@ export const searchBillsTool = tool('canparl_search_bills', {
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
     try {
+      const limit = clampCount('limit', input.limit, LIST_CAP);
       const official = getLegisinfoService();
-      let session = normalizeSession(input.session);
-      const provenance = [];
-      if (session === undefined) {
-        const current = await official.getCurrentSession(request);
-        session = current.data;
-        provenance.push(...current.provenance);
-      }
+      const resolved = await official.resolveSession(input.session, request);
+      const session = resolved.data;
+      const provenance = [...resolved.provenance];
       const result = await official.listBills(session, request);
       provenance.push(...result.provenance);
-      let billCode: string | null = null;
-      let originatingChamber: 'House' | 'Senate' | null = null;
-      let billType: string | null = null;
-      let status: string | null = null;
+      let billCode: string | null;
+      let originatingChamber: 'House' | 'Senate' | null;
+      let billType: string | null;
+      let status: string | null;
+      let sponsor: string | null;
       try {
-        if (input.billCode) billCode = normalizeBillCode(input.billCode);
-        if (input.originatingChamber)
-          originatingChamber = normalizeChamber(input.originatingChamber);
-        if (input.billType)
-          billType = normalizeVocabulary(
-            input.billType,
-            extendVocabulary(
-              BILL_TYPES,
-              result.data.map((bill) => bill.billType),
-            ),
-          );
-        if (input.status)
-          status = normalizeVocabulary(
-            input.status,
-            extendVocabulary(
-              BILL_STATUSES,
-              result.data.map((bill) => bill.status),
-            ),
-          );
+        billCode = normalizeFilter('billCode', input.billCode, normalizeBillCode) ?? null;
+        originatingChamber =
+          normalizeFilter('originatingChamber', input.originatingChamber, normalizeChamber) ?? null;
+        const types = extendVocabulary(
+          BILL_TYPES,
+          result.data.map((bill) => bill.billType),
+        );
+        billType =
+          normalizeFilter('billType', input.billType, (value) =>
+            normalizeVocabulary(value, types),
+          ) ?? null;
+        const statuses = extendVocabulary(
+          BILL_STATUSES,
+          result.data.map((bill) => bill.status),
+        );
+        status =
+          normalizeFilter('status', input.status, (value) =>
+            normalizeVocabulary(value, statuses),
+          ) ?? null;
+        sponsor = normalizeFilter('sponsor', input.sponsor, normalizeSlug) ?? null;
       } catch (error) {
-        if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.ValidationError)
-          throw error;
-        throw ctx.fail('invalid_bill_filter', undefined, undefined, { cause: error });
+        throw ctx.fail('invalid_bill_filter', ...filterFailure(error));
       }
-      const sponsor = input.sponsor ? normalizeSlug(input.sponsor) : null;
       let sponsorKeys: Set<string> | null = null;
+      let sponsorName: string | null = null;
       if (sponsor !== null) {
         const index = getOpenParliamentService();
-        try {
-          const profile = await index.getPolitician(sponsor, request);
-          provenance.push(...profile.provenance);
-        } catch (error) {
-          request.throwIfAborted();
-          if (error instanceof McpError && error.code === JsonRpcErrorCode.NotFound) {
-            throw ctx.fail('sponsor_not_found', undefined, undefined, { cause: error });
-          }
-          throw error;
-        }
+        const profile = await resolvePolitician(sponsor, request, provenance);
+        if (!profile) throw ctx.fail('sponsor_not_found');
+        sponsor = profile.slug;
+        sponsorName = profile.name;
         sponsorKeys = new Set<string>();
         let offset = 0;
         for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
@@ -225,9 +232,10 @@ export const searchBillsTool = tool('canparl_search_bills', {
         .sort(
           (a, b) =>
             a.billCode.slice(0, 1).localeCompare(b.billCode.slice(0, 1)) ||
-            Number(a.billCode.slice(2)) - Number(b.billCode.slice(2)),
+            Number.parseInt(a.billCode.slice(2), 10) - Number.parseInt(b.billCode.slice(2), 10) ||
+            a.billCode.localeCompare(b.billCode),
         );
-      const page = paginate(filtered, input.offset, input.limit);
+      const page = paginate(filtered, input.offset, limit.value);
       ctx.enrich({
         appliedFilters: {
           session,
@@ -237,13 +245,15 @@ export const searchBillsTool = tool('canparl_search_bills', {
           billType,
           status,
           sponsor,
+          sponsorName,
         },
         shown: page.items.length,
-        cap: input.limit,
+        cap: limit.value,
         truncated: page.pagination.hasMore,
       });
       ctx.enrich.total(page.total);
       const notices: string[] = [];
+      if (limit.notice) notices.push(limit.notice);
       if (page.total === 0)
         notices.push(
           'No bills matched the applied filters; remove titleContains, status, or billType and retry canparl_search_bills.',

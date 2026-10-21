@@ -20,7 +20,6 @@ export type {
   PoliticianInput,
   PoliticianProfile,
   SourcePage,
-  SourceResult,
   Speech,
   SpeechInput,
   Vote,

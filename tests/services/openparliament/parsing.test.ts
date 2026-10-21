@@ -3,8 +3,8 @@
  * @module tests/services/openparliament/parsing.test
  */
 import { describe, expect, it } from 'vitest';
+import { htmlToText } from '@/domain/html-to-text.js';
 import {
-  htmlToText,
   parseBallot,
   parseBill,
   parseJson,
@@ -15,6 +15,7 @@ import {
   parseSpeech,
   parseVote,
 } from '@/services/openparliament/parsing.js';
+import { lawrenceCannon } from '../../fixtures/member-tools/harness.js';
 
 const actor = { name: 'Synthetic Member', url: '/politicians/synthetic-member/' };
 const membership = {
@@ -75,6 +76,66 @@ describe('OpenParliament source records', () => {
     expect(result.links).toEqual([{ url: 'https://example.test/profile', note: 'Website' }]);
     expect(JSON.stringify(result)).not.toContain('private@example.test');
   });
+  it('relays an http profile link as published in the real Lawrence Cannon profile', () => {
+    expect(parsePoliticianProfile(lawrenceCannon())).toMatchObject({
+      slug: 'lawrence-cannon',
+      personIds: null,
+      imageUrl: 'https://openparliament.ca/media/polpics/414.jpg',
+      links: [{ url: 'http://www.lawrencecannon.com/', note: 'Official site' }],
+    });
+  });
+  it('relays every absolute HTTP(S) profile link exactly as published, never normalized', () => {
+    const links = [
+      'http://www.cannan.ca',
+      'https://www.ourcommons.ca/members/en/ron-cannan(35933)',
+      'HTTP://Example.TEST/Path',
+    ];
+    expect(
+      parsePoliticianProfile({ ...actor, links: links.map((url) => ({ url })) }).links,
+    ).toEqual(links.map((url) => ({ url, note: null })));
+  });
+  it.each([
+    ['/members/relative-link/', 'https://openparliament.ca/members/relative-link/'],
+    ['/politicians/synthetic-member/', 'https://openparliament.ca/politicians/synthetic-member/'],
+    ['//example-mp.test/profile', 'https://example-mp.test/profile'],
+    ['Official site', 'https://openparliament.ca/Official%20site'],
+    ['   ', 'https://openparliament.ca/'],
+  ])(
+    'resolves non-absolute profile link %j against OpenParliament as 0.1.1 did',
+    (url, expected) => {
+      expect(parsePoliticianProfile({ ...actor, links: [{ url }] }).links).toEqual([
+        { url: expected, note: null },
+      ]);
+    },
+  );
+  it.each([
+    '',
+    'https://user:secret@example.test/',
+    'http://user@example.test/',
+    '//user:secret@example-mp.test/profile',
+    'javascript:alert(1)',
+    'mailto:member@example.test',
+    'data:text/plain,profile',
+    'ftp://example.test/profile',
+  ])('rejects unusable profile link %j as malformed without retry', (url) => {
+    expect(() => parsePoliticianProfile({ ...actor, links: [{ url }] })).toThrow(
+      expect.objectContaining({ data: { field: 'link', retryable: false } }),
+    );
+  });
+  it.each([
+    ['/media/polpics/414.jpg', 'https://openparliament.ca/media/polpics/414.jpg'],
+    ['https://images.example.test/portrait.png', 'https://images.example.test/portrait.png'],
+  ])('keeps the HTTPS image rule for %s', (image, expected) => {
+    expect(parsePolitician({ ...actor, image }).imageUrl).toBe(expected);
+  });
+  it.each([
+    'http://images.example.test/portrait.png',
+    'https://user:secret@images.example.test/portrait.png',
+  ])('rejects image %s as malformed', (image) => {
+    expect(() => parsePolitician({ ...actor, image })).toThrow(
+      expect.objectContaining({ data: { field: 'link', retryable: false } }),
+    );
+  });
   it('preserves bill/vote nulls and bilingual titles without inventing translations', () => {
     expect(parseBill(bill)).toMatchObject({
       legisinfoId: null,
@@ -95,6 +156,19 @@ describe('OpenParliament source records', () => {
     });
     expect(parseVote(vote)).toMatchObject({ date: null, subject: null, result: null });
   });
+  it.each(['C-15A', 'C-333A', 'S-1001'])('reads split-bill or plain bill path %s', (code) => {
+    expect(parseBill({ url: `/bills/37-1/${code}/`, session: '37-1', number: code })).toMatchObject(
+      { session: '37-1', billCode: code, url: `https://openparliament.ca/bills/37-1/${code}/` },
+    );
+  });
+  it.each(['C-15AB', 'C-15A1', 'C-15a', 'C-015', 'C-A'])(
+    'rejects malformed bill path %s without retry',
+    (code) => {
+      expect(() =>
+        parseBill({ url: `/bills/37-1/${code}/`, session: '37-1', number: code }),
+      ).toThrow(expect.objectContaining({ data: expect.objectContaining({ retryable: false }) }));
+    },
+  );
   it.each(['Yes', 'No', 'Paired', "Didn't vote"])('preserves ballot vocabulary %s', (value) => {
     expect(parseBallot({ ...ballot, ballot: value })).toMatchObject({
       ballot: value,

@@ -1,7 +1,13 @@
 /** @fileoverview Actual source session indexes and observed/catalog vocabulary. @module mcp-server/tools/definitions/list-reference.tool */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { normalizeSession, vocabularyKey } from '@/domain/normalization.js';
+import {
+  filterFailure,
+  normalizeFilter,
+  normalizeSession,
+  rejectSession,
+  vocabularyKey,
+} from '@/domain/normalization.js';
 import {
   BILL_STATUSES,
   BILL_TYPES,
@@ -113,7 +119,7 @@ export const listReferenceTool = tool('canparl_list_reference', {
     {
       reason: 'unknown_reference_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Session absent from the topic-relevant source index.',
+      when: 'Session malformed or absent from the topic-relevant source index.',
       recovery:
         'Call canparl_list_reference with topic sessions and omit session to see supported choices.',
       retryable: false,
@@ -129,7 +135,12 @@ export const listReferenceTool = tool('canparl_list_reference', {
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
     try {
-      const selected = normalizeSession(input.session);
+      let selected: string | undefined;
+      try {
+        selected = normalizeFilter('session', input.session, (value) => normalizeSession(value));
+      } catch (error) {
+        throw ctx.fail('unknown_reference_session', ...filterFailure(error));
+      }
       if (input.topic === 'sessions' && selected) throw ctx.fail('incompatible_reference_session');
       const official = getLegisinfoService();
       const house = getOurCommonsService();
@@ -172,17 +183,21 @@ export const listReferenceTool = tool('canparl_list_reference', {
         );
       } else if (session) {
         const voteTopic = input.topic === 'vote_results' || input.topic === 'vote_document_types';
-        if (voteTopic) {
-          const index = await house.getVoteSessions(request);
-          provenance.push(...index.provenance);
-          if (!index.data.some((row) => row.session === session))
-            throw ctx.fail('unknown_reference_session');
-        } else {
-          const index = await official.getSessions(request);
-          provenance.push(...index.provenance);
-          if (!index.data.some((row) => row.session === session))
-            throw ctx.fail('unknown_reference_session');
-        }
+        const index = voteTopic
+          ? await house.getVoteSessions(request)
+          : await official.getSessions(request);
+        provenance.push(...index.provenance);
+        if (!index.data.some((row) => row.session === session))
+          throw ctx.fail(
+            'unknown_reference_session',
+            ...filterFailure(
+              rejectSession(
+                'session',
+                voteTopic ? 'official House division' : 'official bill',
+                index.data.map((row) => row.session),
+              ),
+            ),
+          );
         let catalog: readonly string[];
         let observed: (string | null)[];
         let source: 'legisinfo' | 'ourcommons';

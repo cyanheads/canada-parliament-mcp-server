@@ -1,0 +1,55 @@
+{
+  "name": "Lawrence Cannon",
+  "given_name": "Lawrence",
+  "family_name": "Cannon",
+  "gender": "male",
+  "image": "/media/polpics/414.jpg",
+  "other_info": {
+    "alternate_name": ["lawrence cannon"],
+    "parl_id": ["78345", "78771"],
+    "parlinfo_id": ["7d224fe4-489d-41a1-aaa5-a36d127d8585"],
+    "freebase_id": ["/en/lawrence_cannon"],
+    "wikipedia_id": ["3154503"],
+    "favourite_word": ["colleague"],
+    "twitter_id": ["23301990"],
+    "parl_affil_id": ["128230", "128697"]
+  },
+  "links": [
+    {
+      "url": "http://www.lawrencecannon.com/",
+      "note": "Official site"
+    }
+  ],
+  "memberships": [
+    {
+      "url": "/politicians/memberships/364/",
+      "start_date": "2006-04-03",
+      "end_date": "2011-03-26",
+      "party": {
+        "name": {
+          "en": "Conservative Party of Canada"
+        },
+        "short_name": {
+          "en": "Conservative"
+        }
+      },
+      "label": {
+        "en": "Conservative MP for Pontiac"
+      },
+      "riding": {
+        "name": {
+          "en": "Pontiac"
+        },
+        "province": "QC",
+        "id": 24057
+      }
+    }
+  ],
+  "url": "/politicians/lawrence-cannon/",
+  "related": {
+    "speeches_url": "/speeches/?politician=lawrence-cannon",
+    "ballots_url": "/votes/ballots/?politician=lawrence-cannon",
+    "sponsored_bills_url": "/bills/?sponsor_politician=lawrence-cannon",
+    "activity_rss_url": "/politicians/414/rss/activity/"
+  }
+}

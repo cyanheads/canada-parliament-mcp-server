@@ -4,6 +4,7 @@ import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type CallBudget, createRequestContext } from '@/domain/request-context.js';
 import { OurCommonsService } from '@/services/ourcommons/ourcommons-service.js';
+import { realMemberVotes } from '../../fixtures/member-tools/harness.js';
 
 const base = 'https://www.ourcommons.ca/Members/en';
 const picker = `${base}/votes`;
@@ -134,10 +135,88 @@ describe('OurCommonsService network boundary', () => {
     sessions();
     http.route({ match: listing, respond: new Response('<ArrayOfVote/>') });
     expect((await settle(service.listVotes('45-1', budget))).data).toEqual([]);
-    await expect(service.listVotes('46-1', budget)).rejects.toMatchObject({
-      data: { reason: 'unsupported_vote_session' },
+    const unsupported = service.listVotes('46-1', budget);
+    await expect(unsupported).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: 'session: Expected a session in the official House division session index: "45-1".',
+      data: {
+        reason: 'unsupported_vote_session',
+        retryable: false,
+        field: 'session',
+        allowed: ['45-1'],
+      },
     });
+    await expect(unsupported).rejects.not.toHaveProperty('data.session');
     expect(http.calls.map((call) => call.request.url)).toEqual([picker, listing]);
+  });
+  describe('member votes', () => {
+    const latest = `${base}/2897/votes/xml`;
+    const pinned = `${base}/2897/votes/xml?parlSession=45-1`;
+    const feed = realMemberVotes('2897-45-1');
+    it('reads the latest session without parlSession and serves the repeat from cache', async () => {
+      http.route({ match: latest, respond: () => new Response(feed) });
+      const first = await settle(service.listMemberVotes('2897', undefined, budget));
+      expect(first.data).toHaveLength(25);
+      expect(first.provenance).toEqual([
+        { source: 'ourcommons', url: latest, retrievedAt: expect.any(String), cached: false },
+      ]);
+      const second = await service.listMemberVotes('2897', undefined, budget);
+      expect(second.data).toEqual(first.data);
+      expect(second.provenance[0]).toMatchObject({
+        cached: true,
+        retrievedAt: first.provenance[0]?.retrievedAt,
+      });
+      expect(http.calls.map((call) => call.request.url)).toEqual([latest]);
+      expect(http.calls[0]?.request.headers.get('accept')).toBe('application/xml');
+      expect(http.calls[0]?.request.redirect).toBe('manual');
+    });
+    it('verifies a requested session on the picker before reading that session', async () => {
+      sessions();
+      http.route({ match: pinned, respond: () => new Response(feed) });
+      const result = await settle(service.listMemberVotes('2897', '45-1', budget));
+      expect(result.data[0]?.session).toBe('45-1');
+      expect(result.provenance.map((source) => source.url)).toEqual([picker, pinned]);
+      expect(http.calls.map((call) => call.request.url)).toEqual([picker, pinned]);
+    });
+    it('rejects a session absent from the picker under votesSession without reading ballots', async () => {
+      sessions();
+      await expect(settle(service.listMemberVotes('2897', '44-1', budget))).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message:
+          'votesSession: Expected a session in the official House division session index: "45-1".',
+        data: {
+          reason: 'unsupported_vote_session',
+          retryable: false,
+          field: 'votesSession',
+          allowed: ['45-1'],
+        },
+      });
+      expect(http.calls.map((call) => call.request.url)).toEqual([picker]);
+    });
+    it.each(['0', '02897', '2897/../search', '-1', ''])(
+      'rejects person ID %j before any HTTP',
+      async (personId) => {
+        await expect(service.listMemberVotes(personId, undefined, budget)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+        });
+        expect(http.calls).toHaveLength(0);
+      },
+    );
+    it('does not cache a feed that answers for another person', async () => {
+      http.route(
+        { match: latest, once: true, respond: () => new Response(realMemberVotes('35933-latest')) },
+        { match: latest, respond: () => new Response(feed) },
+      );
+      await expect(
+        settle(service.listMemberVotes('2897', undefined, budget)),
+      ).rejects.toMatchObject({
+        data: { reason: 'upstream_response_invalid', field: 'person identity', retryable: false },
+      });
+      expect((await settle(service.listMemberVotes('2897', undefined, budget))).data).toHaveLength(
+        25,
+      );
+      expect(http.calls).toHaveLength(2);
+    });
   });
   it('spaces distinct HTTP starts by at least 250ms', async () => {
     const starts: number[] = [];

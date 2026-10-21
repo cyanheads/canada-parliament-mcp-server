@@ -2,10 +2,9 @@
  * @fileoverview Fixed-origin OpenParliament source service with shared pacing and budgets.
  * @module services/openparliament/openparliament-service
  */
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import type { ServerConfig } from '@/config/server-config.js';
-import { getServerConfig } from '@/config/server-config.js';
+import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import {
   normalizeBillCode,
   normalizeDate,
@@ -14,6 +13,7 @@ import {
   validateDateRange,
 } from '@/domain/normalization.js';
 import type { RequestContext } from '@/domain/request-context.js';
+import type { SourceResult } from '@/domain/schemas.js';
 import {
   API_ORIGIN,
   malformed,
@@ -27,6 +27,8 @@ import {
   parsePoliticianProfile,
   parseSpeech,
   parseVote,
+  politicianPath,
+  record,
 } from './parsing.js';
 import type {
   Ballot,
@@ -39,7 +41,6 @@ import type {
   PoliticianInput,
   PoliticianProfile,
   SourcePage,
-  SourceResult,
   Speech,
   SpeechInput,
   Vote,
@@ -118,20 +119,16 @@ export class OpenParliamentService {
       };
     this.cache.delete(key);
     const deadlineMs = Math.min(20_000, request.remainingMs());
-    const startedAt = Date.now();
+    const deadlineAt = Date.now() + deadlineMs;
     try {
       return await withRetry(
         ({ signal }) =>
           pacer().run(
             async () => {
               request.throwIfAborted();
-              const remainingMs = Math.min(
-                request.remainingMs(),
-                deadlineMs - (Date.now() - startedAt),
-              );
               const response = await fetchWithTimeout(
                 key,
-                Math.min(10_000, Math.max(1, remainingMs)),
+                Math.min(10_000, Math.max(1, deadlineAt - Date.now())),
                 request.context,
                 {
                   signal,
@@ -201,33 +198,39 @@ export class OpenParliamentService {
     input: PoliticianInput,
     request: RequestContext,
   ): Promise<SourcePage<Politician>> {
-    if (!['all', 'current'].includes(input.include))
-      throw validationError('Invalid politician inclusion mode.');
-    const params = { ...pageParams(input), include: input.include } as Record<string, string>;
+    const params: Record<string, string> = { ...pageParams(input), include: input.include };
     if (input.name?.trim()) params.name = input.name.trim();
     if (input.familyName?.trim()) params.family_name = input.familyName.trim();
     return this.page(requestUrl('/politicians/', params), parsePolitician, request);
   }
-  /** Fetch a profile by an exact returned slug, never a numeric official ID. */
+  /**
+   * Fetch a profile by an exact returned slug, never a numeric official ID. A numeric OpenParliament
+   * ID can answer with a slugged politician's record; that value is no returned identifier, so it is
+   * not found rather than a malformed response.
+   */
   getPolitician(slug: string, request: RequestContext): Promise<SourceResult<PoliticianProfile>> {
-    const path = actorPath(slug);
+    const requested = normalizeSlug(slug);
     return this.request(
-      requestUrl(path),
+      requestUrl(actorPath(requested)),
       PROFILE_TTL,
       (value) => {
-        const profile = parsePoliticianProfile(value);
-        if (profile.slug !== normalizeSlug(slug)) return malformed('politician.identity');
-        return profile;
+        if (politicianPath(record(value).url) === actorPath(requested))
+          return parsePoliticianProfile(value);
+        if (/^\d+$/.test(requested))
+          throw notFound('OpenParliament has no politician with the requested identifier.', {
+            retryable: false,
+          });
+        return malformed('politician.identity');
       },
       request,
     );
   }
   /** Read one sponsor page; complete-set scans are composed by the bill tool. */
   listBills(input: BillInput, request: RequestContext): Promise<SourcePage<Bill>> {
-    const params = { ...pageParams(input), sponsor_politician: actorPath(input.sponsor) } as Record<
-      string,
-      string
-    >;
+    const params: Record<string, string> = {
+      ...pageParams(input),
+      sponsor_politician: actorPath(input.sponsor),
+    };
     if (input.session?.trim()) params.session = sessionToken(input.session);
     return this.page(requestUrl('/bills/', params), parseBill, request);
   }

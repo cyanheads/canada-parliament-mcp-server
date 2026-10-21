@@ -2,23 +2,13 @@
  * @fileoverview Parsed OpenParliament records and bounded source requests.
  * @module services/openparliament/types
  */
-import type { Source } from '@/domain/schemas.js';
+import type { BilingualText, Source } from '@/domain/schemas.js';
 
-/** Original retrieval metadata accompanies every source result. */
-export interface SourceResult<T> {
-  data: T;
-  provenance: Source[];
-}
 /** An upstream page, with a validated continuation rather than a fetchable URL. */
 export interface SourcePage<T> {
   nextOffset: number | null;
   objects: T[];
   provenance: Source[];
-}
-/** English/French text without invented translations. */
-export interface BilingualText {
-  en: string | null;
-  fr: string | null;
 }
 /** Public politician index row; current attributes are not historical affiliations. */
 export interface Politician {

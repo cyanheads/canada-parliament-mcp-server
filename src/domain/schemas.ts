@@ -4,17 +4,16 @@
  */
 import { z } from '@cyanheads/mcp-ts-core';
 
+const blankToUndefined = (value: unknown) =>
+  typeof value === 'string' ? value.trim() || undefined : value;
 /** Trim an optional input, interpreting a blank form field as absent. */
 export const OptionalStringSchema = z
-  .preprocess(
-    (value) => (typeof value === 'string' ? value.trim() || undefined : value),
-    z.string().optional(),
-  )
+  .preprocess(blankToUndefined, z.string().optional())
   .describe('Optional trimmed text; blank means unset.');
 /** Session input; services resolve an omitted value from the current official feed. */
 export const SessionInputSchema = z
   .preprocess(
-    (value) => (typeof value === 'string' ? value.trim() || undefined : value),
+    blankToUndefined,
     z
       .union([
         z
@@ -53,6 +52,11 @@ export const SourceSchema = z
   .describe('Source retrieval metadata.');
 /** Source retrieval metadata. */
 export type Source = z.infer<typeof SourceSchema>;
+/** Parsed source data with its original retrieval provenance. */
+export interface SourceResult<T> {
+  data: T;
+  provenance: Source[];
+}
 /** Bilingual source text, preserving unavailable translations. */
 export const BilingualTextSchema = z
   .object({
@@ -60,14 +64,25 @@ export const BilingualTextSchema = z
     fr: z.string().nullable().describe('French text, or null when unavailable.'),
   })
   .strict();
-/** Default list limit. */
+/** English/French source text without invented translations. */
+export type BilingualText = z.infer<typeof BilingualTextSchema>;
+/**
+ * Hard ceiling on every count input. Values between a tool's per-call cap and this ceiling clamp to
+ * the cap in the handler with a notice; values above it are rejected as absurd input.
+ */
+export const COUNT_CEILING = 10_000;
+/** Per-call row cap of the shared list limit. */
+export const LIST_CAP = 100;
+/** Shared list page size, clamped to {@link LIST_CAP} by each handler. */
 export const LimitSchema = z
   .number()
   .int()
   .min(1)
-  .max(100)
+  .max(COUNT_CEILING)
   .default(25)
-  .describe('Maximum returned rows, from 1 to 100.');
+  .describe(
+    'Maximum returned rows, 1–100 per call; larger values up to 10000 return 100 rows with a notice.',
+  );
 /** Stable ordering offset, not a server-side cursor. */
 export const OffsetSchema = z
   .number()
@@ -79,7 +94,7 @@ export const OffsetSchema = z
 export const PaginationSchema = z
   .object({
     offset: z.number().int().nonnegative().describe('Requested zero-based offset.'),
-    limit: z.number().int().positive().describe('Requested maximum rows.'),
+    limit: z.number().int().positive().describe('Effective maximum rows after the per-call cap.'),
     nextOffset: z
       .number()
       .int()

@@ -1,11 +1,5 @@
 /** @fileoverview Parsed official House records. @module services/ourcommons/types */
-import type { Source } from '../../domain/schemas.js';
 
-/** Parsed data with its original retrieval provenance. */
-export interface SourceResult<T> {
-  data: T;
-  provenance: Source[];
-}
 /** A session advertised by the House divisions picker. */
 export interface VoteSession {
   label: string;
@@ -41,9 +35,11 @@ export interface Division {
   url: string;
   yeas: number | null;
 }
+/** Official recorded ballot vocabulary; nonvoters have no ballot. */
+export type RecordedBallot = 'Yea' | 'Nay' | 'Paired';
 /** One recorded ballot; nonvoters are not inferred. */
 export interface VoteParticipant {
-  ballot: 'Yea' | 'Nay' | 'Paired';
+  ballot: RecordedBallot;
   firstName: string;
   lastName: string;
   name: string;
@@ -51,5 +47,16 @@ export interface VoteParticipant {
   personId: string;
   province: string | null;
   riding: string | null;
+  url: string;
+}
+/** One member's recorded ballot in a division, from that member's official votes feed. */
+export interface MemberVote {
+  ballot: RecordedBallot;
+  billCode: string | null;
+  dateTime: string | null;
+  number: number;
+  result: string | null;
+  session: string;
+  subject: string | null;
   url: string;
 }

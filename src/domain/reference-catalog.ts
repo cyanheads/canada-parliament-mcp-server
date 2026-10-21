@@ -29,6 +29,11 @@ export const BILL_STATUSES = [
 ] as const;
 /** Official division result vocabulary. */
 export const VOTE_RESULTS = ['Agreed To', 'Negatived', 'Tie'] as const;
+/** Certain OpenParliament-to-official result aliases, only at filter boundaries. */
+export const VOTE_RESULT_ALIASES: Readonly<Record<string, string>> = {
+  Passed: 'Agreed To',
+  Failed: 'Negatived',
+};
 /** Official House division document categories. */
 export const VOTE_DOCUMENT_TYPES = [
   'Legislative Process',
@@ -47,6 +52,13 @@ export const PARTIES = ['Liberal', 'Conservative', 'Bloc Québécois', 'NDP', 'G
 export const OFFICIAL_PARTY_ALIASES: Readonly<Record<string, string>> = {
   Bloc: 'Bloc Québécois',
   Green: 'Green Party',
+};
+/** Official recorded House ballot vocabulary; nonvoters have no ballot. */
+export const BALLOTS = ['Yea', 'Nay', 'Paired'] as const;
+/** Certain OpenParliament-to-official ballot aliases, only at filter boundaries. */
+export const OFFICIAL_BALLOT_ALIASES: Readonly<Record<string, string>> = {
+  Yes: 'Yea',
+  No: 'Nay',
 };
 /** Extend catalog labels with distinct nonblank upstream observations. */
 export function extendVocabulary(

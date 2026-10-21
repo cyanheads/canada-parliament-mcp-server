@@ -2,10 +2,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseMembers,
+  parseMemberVotes,
   parseVoteParticipants,
   parseVoteSessions,
   parseVotes,
 } from '@/services/ourcommons/parsing.js';
+import { realMemberVotes } from '../../fixtures/member-tools/harness.js';
 
 const person =
   '<PersonId>9001</PersonId><PersonOfficialFirstName>River</PersonOfficialFirstName><PersonOfficialLastName>Example</PersonOfficialLastName>';
@@ -116,6 +118,16 @@ describe('House source parsing', () => {
     });
     expect(parseVotes('<ArrayOfVote/>', '45-1')).toEqual([]);
   });
+  it.each(['C-15A', 'C-23B', 'S-1001'])('reads split-bill or plain bill code %s', (code) =>
+    expect(
+      parseVotes(votes(`${identity}<BillNumberCode>${code}</BillNumberCode>`), '45-1')[0]?.billCode,
+    ).toBe(code),
+  );
+  it.each(['C-15AB', 'C-15A1', 'C-15a', 'C-015', 'C-A'])('rejects malformed bill code %s', (code) =>
+    expect(() =>
+      parseVotes(votes(`${identity}<BillNumberCode>${code}</BillNumberCode>`), '45-1'),
+    ).toThrow(),
+  );
   it.each(['', '-1', '2.3', 'true'])('rejects malformed optional tally %s', (value) =>
     expect(() =>
       parseVotes(
@@ -166,5 +178,102 @@ describe('House source parsing', () => {
       ),
     ).toThrow();
     expect(parseVoteParticipants('<ArrayOfVoteParticipant/>', '45-1', 901)).toEqual([]);
+  });
+});
+
+describe('member votes feed parsing', () => {
+  const may = realMemberVotes('2897-45-1');
+  /** The real feed with its first occurrence of `from` replaced. */
+  const edit = (from: string, to: string) => may.replace(from, to);
+  const firstRow = may.slice(may.indexOf('<MemberVote>'), may.indexOf('</MemberVote>') + 13);
+  it('maps every real 2897 45-1 row in feed order with its division metadata', () => {
+    const rows = parseMemberVotes(may, '2897');
+    expect(rows).toHaveLength(25);
+    expect(rows.map((row) => row.number).slice(0, 12)).toEqual([
+      179, 178, 177, 176, 175, 174, 173, 172, 171, 170, 169, 159,
+    ]);
+    expect(rows[0]).toEqual({
+      session: '45-1',
+      number: 179,
+      dateTime: '2026-10-20T15:15:00',
+      subject: 'Opposition Motion (Affordability crisis)',
+      result: 'Negatived',
+      billCode: null,
+      ballot: 'Yea',
+      url: 'https://www.ourcommons.ca/Members/en/votes/45/1/179',
+    });
+    expect(rows[1]).toMatchObject({
+      number: 178,
+      billCode: 'C-39',
+      ballot: 'Nay',
+      result: 'Agreed To',
+    });
+    expect(rows.filter((row) => row.billCode === 'C-15').map((row) => row.number)).toEqual([
+      82, 81, 80, 79, 78, 77, 75, 53,
+    ]);
+    expect(new Set(rows.map((row) => row.session))).toEqual(new Set(['45-1']));
+    expect(parseMemberVotes(may, '2897', '45-1')).toEqual(rows);
+  });
+  it('reads the session the feed chooses when none is requested', () => {
+    const rows = parseMemberVotes(realMemberVotes('35933-latest'), '35933');
+    expect(rows.map(({ session, number, billCode }) => ({ session, number, billCode }))).toEqual([
+      { session: '41-2', number: 467, billCode: 'S-2' },
+      { session: '41-2', number: 466, billCode: 'S-4' },
+      { session: '41-2', number: 465, billCode: 'S-4' },
+    ]);
+  });
+  it('reads real Paired ballots with consistent flags', () => {
+    expect(
+      parseMemberVotes(realMemberVotes('88721-45-1'), '88721', '45-1').map((row) => row.ballot),
+    ).toEqual(['Paired', 'Paired', 'Yea']);
+  });
+  it('reads the real empty body for a session the member did not sit in', () => {
+    expect(parseMemberVotes(realMemberVotes('empty'), '2897', '39-1')).toEqual([]);
+  });
+  it('keeps a nil date-time and an absent subject as null', () => {
+    const sparse = edit(
+      '<DecisionEventDateTime>2026-10-20T15:15:00</DecisionEventDateTime>',
+      '<DecisionEventDateTime xsi:nil="true" />',
+    ).replace(
+      '<DecisionDivisionSubject>Opposition Motion (Affordability crisis)</DecisionDivisionSubject>',
+      '',
+    );
+    expect(parseMemberVotes(sparse, '2897')[0]).toMatchObject({
+      number: 179,
+      dateTime: null,
+      subject: null,
+    });
+  });
+  it.each<[string, string, string, string | undefined]>([
+    ['another person', may, '2898', undefined],
+    ['a different requested session', may, '2897', '44-1'],
+    ['two sessions in one feed', edit('<SessionNumber>1<', '<SessionNumber>2<'), '2897', undefined],
+    ['an unknown ballot', edit('>Yea</VoteValueName>', '>Yes</VoteValueName>'), '2897', undefined],
+    ['a conflicting flag', edit('<IsVoteNay>false<', '<IsVoteNay>true<'), '2897', undefined],
+    [
+      'a duplicate division',
+      edit('</ArrayOfMemberVote>', `${firstRow}</ArrayOfMemberVote>`),
+      '2897',
+      undefined,
+    ],
+    [
+      'a malformed bill code',
+      edit('>C-39</BillNumberCode>', '>C-039</BillNumberCode>'),
+      '2897',
+      undefined,
+    ],
+    ['a malformed date-time', edit('2026-10-20T15:15:00', '20 Oct 2026 15:15'), '2897', undefined],
+    [
+      'a missing division number',
+      edit('<DecisionDivisionNumber>179</DecisionDivisionNumber>', ''),
+      '2897',
+      undefined,
+    ],
+  ])('rejects %s as a malformed response without retry', (_name, xml, personId, session) => {
+    expect(() => parseMemberVotes(xml, personId, session)).toThrow(
+      expect.objectContaining({
+        data: expect.objectContaining({ reason: 'upstream_response_invalid', retryable: false }),
+      }),
+    );
   });
 });
