@@ -1,0 +1,9 @@
+{
+  "canada-parliament-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/canada-parliament-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

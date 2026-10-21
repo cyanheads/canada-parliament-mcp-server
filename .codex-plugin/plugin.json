@@ -1,0 +1,25 @@
+{
+  "name": "canada-parliament-mcp-server",
+  "version": "0.1.0",
+  "description": "Track Canadian federal bills, MPs, House votes, and Hansard speeches via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/canada-parliament-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/canada-parliament-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "canada", "parliament", "legisinfo", "hansard", "bills", "votes", "typescript", "bun", "stdio", "streamable-http"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "canada-parliament-mcp-server",
+    "shortDescription": "Track Canadian federal bills, MPs, House votes, and Hansard speeches via MCP. STDIO or Streamable HTTP.",
+    "longDescription": "Track Canadian federal bills, MPs, House votes, and Hansard speeches via MCP. STDIO or Streamable HTTP.",
+    "developerName": "cyanheads",
+    "category": "research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/canada-parliament-mcp-server",
+    "defaultPrompt": []
+  }
+}
