@@ -20,3 +20,6 @@
 /biome.json
 /tsconfig*.json
 /vitest.config.ts
+/.dockerignore
+/.gitattributes
+/devcheck.config.json
