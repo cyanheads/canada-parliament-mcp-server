@@ -725,7 +725,7 @@ describe('canparl_search_bills sponsor identity', () => {
       sponsorCoverage: 'openparliament_index',
       appliedFilters: { sponsor: 'river-example', sponsorName: 'River Example' },
     });
-    expect(urls().filter((url) => url.startsWith(api) || url === rosterUrl)).toEqual([
+    expect(urls().filter((url) => new URL(url).origin === api || url === rosterUrl)).toEqual([
       rosterUrl,
       namePage,
       `${api}${river}`,
@@ -743,7 +743,7 @@ describe('canparl_search_bills sponsor identity', () => {
         total: 1,
         appliedFilters: { sponsor: 'river-example', sponsorName: 'River Example' },
       });
-      expect(urls().filter((url) => url.startsWith(api) || url === rosterUrl)).toEqual([
+      expect(urls().filter((url) => new URL(url).origin === api || url === rosterUrl)).toEqual([
         rosterUrl,
         namePage,
         `${api}${river}`,
@@ -771,7 +771,7 @@ describe('canparl_search_bills sponsor identity', () => {
         JsonRpcErrorCode.NotFound,
         notFound.recovery,
       );
-      expect(urls().filter((url) => url.startsWith(api))).toEqual([
+      expect(urls().filter((url) => new URL(url).origin === api)).toEqual([
         namePage,
         ...paths.map((path) => `${api}${path}`),
       ]);
@@ -801,7 +801,7 @@ describe('canparl_search_bills sponsor identity', () => {
     });
     expect(
       urls()
-        .filter((url) => url.startsWith(api) || url === rosterUrl)
+        .filter((url) => new URL(url).origin === api || url === rosterUrl)
         .slice(0, 2),
     ).toEqual([rosterUrl, `${api}/politicians/5724/`]);
   });
@@ -856,6 +856,6 @@ describe('canparl_search_bills sponsor identity', () => {
       bills: [{ billCode: 'C-10' }],
       appliedFilters: { sponsor: 'candidate-2', sponsorName: 'River Example' },
     });
-    expect(urls().filter((url) => url.startsWith(api))).toHaveLength(14);
+    expect(urls().filter((url) => new URL(url).origin === api)).toHaveLength(14);
   });
 });
