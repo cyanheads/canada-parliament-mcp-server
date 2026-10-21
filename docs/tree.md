@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-21 04:04:00
+Generated on: 2026-10-21 08:38:53
 
 ```text
 canada-parliament-mcp-server/
@@ -24,6 +24,7 @@ canada-parliament-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -136,6 +137,7 @@ canada-parliament-mcp-server/
 │   ├── config/
 │   │   └── server-config.ts
 │   ├── domain/
+│   │   ├── html-to-text.ts
 │   │   ├── normalization.ts
 │   │   ├── reference-catalog.ts
 │   │   ├── request-context.ts
@@ -144,6 +146,7 @@ canada-parliament-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── _format.ts
+│   │           ├── _member-identity.ts
 │   │           ├── get-bill.tool.ts
 │   │           ├── get-member.tool.ts
 │   │           ├── get-vote.tool.ts
@@ -173,20 +176,36 @@ canada-parliament-mcp-server/
 │   ├── config/
 │   │   └── server-config.test.ts
 │   ├── domain/
+│   │   ├── html-to-text.test.ts
 │   │   ├── normalization.test.ts
 │   │   ├── request-context.test.ts
 │   │   └── schemas.test.ts
 │   ├── fixtures/
 │   │   ├── bill-tools/
+│   │   │   ├── dossiers/
+│   │   │   │   ├── 35-1-c-1.json
+│   │   │   │   ├── 41-1-c-38.json
+│   │   │   │   ├── 42-1-c-86.json
+│   │   │   │   ├── 44-1-c-69.json
+│   │   │   │   └── 45-1-c-15.json
 │   │   │   └── harness.ts
 │   │   ├── integration/
 │   │   │   └── upstream-preload.ts
 │   │   ├── member-tools/
-│   │   │   └── harness.ts
+│   │   │   ├── member-votes/
+│   │   │   │   ├── 2897-44-1.xml
+│   │   │   │   ├── 2897-45-1.xml
+│   │   │   │   ├── 35933-latest.xml
+│   │   │   │   ├── 88721-45-1.xml
+│   │   │   │   └── empty.xml
+│   │   │   ├── harness.ts
+│   │   │   └── lawrence-cannon.json
 │   │   ├── speech-tools/
 │   │   │   └── harness.ts
-│   │   └── vote-tools/
-│   │       └── harness.ts
+│   │   ├── vote-tools/
+│   │   │   └── harness.ts
+│   │   ├── filter-rejection.ts
+│   │   └── markdown-decode.ts
 │   ├── fuzz/
 │   ├── integration/
 │   │   └── parliament-server.test.ts
@@ -209,6 +228,7 @@ canada-parliament-mcp-server/
 │       ├── get-member.test.ts
 │       ├── get-vote.test.ts
 │       ├── list-reference.test.ts
+│       ├── member-identity.test.ts
 │       ├── search-bills.test.ts
 │       ├── search-members.test.ts
 │       ├── search-speeches.test.ts
@@ -222,6 +242,7 @@ canada-parliament-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
