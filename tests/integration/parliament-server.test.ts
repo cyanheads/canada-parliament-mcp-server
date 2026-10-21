@@ -22,6 +22,9 @@ interface ListedTool {
   outputSchema: Record<string, unknown>;
 }
 const root = fileURLToPath(new URL('../../', import.meta.url));
+const packageVersion = (
+  JSON.parse(await readFile(`${root}package.json`, 'utf8')) as { version: string }
+).version;
 
 describe('actual parliament application over stdio', () => {
   let child: ChildProcessWithoutNullStreams;
@@ -125,7 +128,7 @@ describe('actual parliament application over stdio', () => {
     expect(initialized.serverInfo).toMatchObject({
       name: 'canada-parliament-mcp-server',
       title: 'canada-parliament-mcp-server',
-      version: '0.1.0',
+      version: packageVersion,
     });
     expect(initialized.instructions).toContain('canparl_search_bills');
     expect(initialized.capabilities.tools).toBeDefined();
