@@ -17,6 +17,7 @@
       "command": "node",
       "args": ["${__dirname}/dist/index.js"],
       "env": {
+        "CANPARL_USER_AGENT": "${user_config.CANPARL_USER_AGENT}",
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production"
@@ -27,6 +28,13 @@
     "runtimes": { "node": ">=24.0.0" }
   },
   "tools_generated": true,
-  "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "CANPARL_USER_AGENT": {
+      "type": "string",
+      "title": "HTTP User-Agent",
+      "description": "Optional HTTP identification; blank uses the server default. CR/LF forbidden.",
+      "required": false,
+      "default": ""
+    }
+  }
 }

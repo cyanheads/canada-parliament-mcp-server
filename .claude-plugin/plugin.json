@@ -12,11 +12,21 @@
   "repository": "https://github.com/cyanheads/canada-parliament-mcp-server",
   "license": "Apache-2.0",
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "canada", "parliament", "legisinfo", "hansard", "bills", "votes", "typescript", "bun", "stdio", "streamable-http"],
+  "userConfig": {
+    "CANPARL_USER_AGENT": {
+      "type": "string",
+      "title": "HTTP User-Agent",
+      "description": "Optional HTTP identification; blank uses the server default. CR/LF forbidden.",
+      "required": false,
+      "default": ""
+    }
+  },
   "mcpServers": {
     "canada-parliament-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/canada-parliament-mcp-server"],
       "env": {
+        "CANPARL_USER_AGENT": "${user_config.CANPARL_USER_AGENT}",
         "MCP_TRANSPORT_TYPE": "stdio"
       }
     }
