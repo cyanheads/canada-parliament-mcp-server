@@ -2,6 +2,7 @@
  * @fileoverview Field-named filter rejection oracle shared by every tool contract test.
  * @module tests/fixtures/filter-rejection
  */
+import { Parser } from 'commonmark';
 import { expect } from 'vitest';
 
 interface ToolErrorResult {
@@ -26,7 +27,7 @@ export interface FilterRejection {
 export function assertFilterRejection(result: ToolErrorResult, expected: FilterRejection) {
   expect(result.isError).toBe(true);
   const { error } = result.structuredContent as {
-    error: { message: string; data: Record<string, unknown> };
+    error: { message: string; data: Record<string, unknown> & { recovery: { hint: string } } };
   };
   expect(error.data.field).toBe(expected.field);
   expect(error.message.startsWith(`${expected.field}: `)).toBe(true);
@@ -39,8 +40,17 @@ export function assertFilterRejection(result: ToolErrorResult, expected: FilterR
     .filter((block) => block.type === 'text')
     .map((block) => block.text ?? '')
     .join('\n');
-  expect(text).toContain(`Error: ${error.message}\n\nRecovery: `);
+  const walker = new Parser().parse(text).walker();
+  let visible = '';
+  for (let event = walker.next(); event; event = walker.next()) {
+    if (!event.entering) continue;
+    if (event.node.type === 'text') visible += event.node.literal;
+    else if (event.node.type === 'softbreak' || event.node.type === 'linebreak') visible += '\n';
+    else if (event.node.type === 'paragraph' && visible) visible += '\n\n';
+  }
+  expect(visible).toContain(`Error: ${error.message}\n\nRecovery: `);
+  expect(visible).toContain(error.data.recovery.hint);
   if (!expected.rejected) return;
-  expect(text).not.toContain(expected.rejected);
+  expect(visible).not.toContain(expected.rejected);
   expect(JSON.stringify(result.structuredContent)).not.toContain(expected.rejected);
 }
