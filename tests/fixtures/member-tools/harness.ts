@@ -163,8 +163,11 @@ export function parity(
     else expect(lines).toContain(`**${key}:** ${String(data[key])}`);
   }
   if (data.notice) {
-    expect(lines).toContain(`> ${data.notice}`);
-    expect(parseMarkdown(`> ${data.notice}`).text).toBe(data.notice);
+    if (definition.enrichmentTrailer?.notice?.render) expectExact(fields.notice, data.notice);
+    else {
+      expect(lines).toContain(`> ${data.notice}`);
+      expect(parseMarkdown(`> ${data.notice}`).text).toBe(data.notice);
+    }
   }
   return data;
 }

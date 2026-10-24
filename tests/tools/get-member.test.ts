@@ -45,15 +45,65 @@ describe('canparl_get_member production contract', () => {
       match: rosterUrl,
       respond: new Response(collection('ArrayOfMemberOfParliament', 'MemberOfParliament', rows)),
     });
-  const candidates = (rows: unknown[], next: number | null = null) =>
-    page(
+  const surnamePage = `${origin}/politicians/?limit=4&offset=0&include=all&family_name=Example`;
+  const candidates = (rows: unknown[], next: number | null = null) => {
+    if (rows.length === 0 && next === null)
+      page(
+        http,
+        '/politicians/',
+        { limit: 4, offset: 0, include: 'all', family_name: 'Example' },
+        [],
+      );
+    return page(
       http,
       '/politicians/',
       { limit: 4, offset: 0, include: 'all', name: 'River Example' },
       rows,
       next,
     );
+  };
   const disabled = { sponsoredBills: 0, recentVotes: 0 };
+  it.each([{ personId: '1787' }, { slug: '1787' }])(
+    'crosswalks the captured Judy Sgro name/alias/ID through %j on both surfaces',
+    async (input) => {
+      roster([
+        rawPerson(1787, { PersonOfficialFirstName: 'Judy A.', PersonOfficialLastName: 'Sgro' }),
+      ]);
+      // Exact response and identity fields captured from OpenParliament on 2026-10-24.
+      page(
+        http,
+        '/politicians/',
+        { limit: 4, offset: 0, include: 'all', name: 'Judy A. Sgro' },
+        [],
+      );
+      page(http, '/politicians/', { limit: 4, offset: 0, include: 'all', family_name: 'Sgro' }, [
+        { name: 'Judy Sgro', url: '/politicians/judy-sgro/' },
+      ]);
+      json(http, '/politicians/judy-sgro/', {
+        name: 'Judy Sgro',
+        given_name: 'Judy',
+        family_name: 'Sgro',
+        gender: 'female',
+        url: '/politicians/judy-sgro/',
+        other_info: {
+          parl_mp_id: ['1787'],
+          alternate_name: ['judy sgro', 'the honourable judy sgro', 'judy a. sgro'],
+        },
+      });
+      const data = parity(await call({ ...input, ...disabled }), getMemberTool);
+      expect(data).toMatchObject({
+        member: { personId: '1787', name: 'Judy A. Sgro', slug: 'judy-sgro' },
+        openParliament: { status: 'available', reason: null },
+        appliedFilters: { personId: '1787', slug: null },
+      });
+      expect(http.calls.map((c) => c.request.url)).toEqual([
+        rosterUrl,
+        `${origin}/politicians/?limit=4&offset=0&include=all&name=Judy+A.+Sgro`,
+        `${origin}/politicians/?limit=4&offset=0&include=all&family_name=Sgro`,
+        `${origin}/politicians/judy-sgro/`,
+      ]);
+    },
+  );
   const memberVotes = (personId: string, body: string, session?: string) =>
     http.route({ match: memberVotesUrl(personId, session), respond: () => new Response(body) });
   const bill = (number: number, detail = false) => ({
@@ -175,7 +225,9 @@ describe('canparl_get_member production contract', () => {
         notice: expect.stringContaining('No verified OpenParliament match'),
       });
       expect(http.calls).toHaveLength(
-        3 + (['four', 'continuation'].includes(scenario) ? 0 : count),
+        3 +
+          (['four', 'continuation'].includes(scenario) ? 0 : count) +
+          (scenario === 'none' ? 1 : 0),
       );
     },
   );
@@ -696,7 +748,7 @@ describe('canparl_get_member production contract', () => {
       ],
       notice: expect.stringContaining('No verified OpenParliament match'),
     });
-    expect(http.calls).toHaveLength(2);
+    expect(http.calls).toHaveLength(3);
   });
   it('reads the roster once, before OpenParliament, for a numeric slug and reuses it for currentness', async () => {
     roster();
@@ -1083,6 +1135,7 @@ describe('canparl_get_member production contract', () => {
         expect(http.calls.map((c) => c.request.url)).toEqual([
           rosterUrl,
           namePage,
+          surnamePage,
           memberVotesUrl('2897'),
         ]);
       },
@@ -1187,6 +1240,7 @@ describe('canparl_get_member production contract', () => {
       expect(http.calls.map((c) => c.request.url)).toEqual([
         rosterUrl,
         namePage,
+        surnamePage,
         votePicker,
         memberVotesUrl('2897', '44-1'),
       ]);
@@ -1225,7 +1279,12 @@ describe('canparl_get_member production contract', () => {
         allowed: ['45-1', '44-1'],
         shape: 'Expected a session in the official House division session index',
       });
-      expect(http.calls.map((c) => c.request.url)).toEqual([rosterUrl, namePage, votePicker]);
+      expect(http.calls.map((c) => c.request.url)).toEqual([
+        rosterUrl,
+        namePage,
+        surnamePage,
+        votePicker,
+      ]);
     });
     it.each<[Record<string, unknown>, string, FilterRejection]>([
       [
@@ -1330,6 +1389,7 @@ describe('canparl_get_member production contract', () => {
       expect(http.calls.map((c) => c.request.url)).toEqual([
         rosterUrl,
         namePage,
+        surnamePage,
         memberVotesUrl('2897'),
       ]);
     });

@@ -53,18 +53,25 @@ export const realDossier = (
 export function setup() {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-20T00:00:00Z'));
-  const http = createFetchMock();
+  const unexpected: string[] = [];
+  const http = createFetchMock([], {
+    onUnhandled: (request) => {
+      unexpected.push(request.url);
+      throw new Error(`Unexpected HTTP: ${request.url}`);
+    },
+  });
   http.install();
   initLegisinfoService({ userAgent: 'synthetic-bill-contract-tests' });
   initOpenParliamentService({ userAgent: 'synthetic-bill-contract-tests' });
-  return http;
+  return Object.assign(http, { unexpected });
 }
 /** Release all service queues and restore the process boundary. */
-export function teardown(http: ReturnType<typeof createFetchMock>) {
+export function teardown(http: ReturnType<typeof setup>) {
   disposeLegisinfoService();
   disposeOpenParliamentService();
   http.restore();
   vi.useRealTimers();
+  expect(http.unexpected).toEqual([]);
 }
 /** Drive pacing without a real wait or swallowing early failures. */
 export async function settle<T>(promise: Promise<T>): Promise<T> {

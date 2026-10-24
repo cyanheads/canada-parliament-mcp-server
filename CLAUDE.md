@@ -2,7 +2,7 @@
 
 **Server:** canada-parliament-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.16`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
 **Zod:** ^4.6.7
@@ -75,14 +75,17 @@ Each handler creates a request context and disposes it in `finally`. One 50-seco
 
 Requests use fixed HTTPS origins `www.parl.ca`, `www.ourcommons.ca`, and `api.openparliament.ca`. Validate identifiers and pagination links; returned image/publication/profile links are references, never arbitrary fetch targets. Cache successful responses only and retain original retrieval timestamps.
 
+Official HTTP 403 refusals become source-named `upstream_blocked` ServiceUnavailable failures with status 403, no retry, and source-specific retry-later recovery. Disable upstream error-body capture before framework logging. Never bypass source restrictions or substitute unofficial data. Optional enrichment keeps its unavailable-section contract.
+
 ### Domain constraints
 
 - Bills cover both chambers; members, divisions, and speeches cover the House only. Early bill sessions have basic coverage and nullable dossier fields.
 - Official `personId` and OpenParliament `slug` are distinct. Use returned `detailLookup` and verified crosswalks, never name-derived slugs. Slug inputs (`slug`, `sponsor`, `politician`) read a digit-only value equal to a current personId, or its `/politicians/<digits>/` path or profile URL, through the shared crosswalk in `_member-identity.ts`, the roster first; every other numeric value is an OpenParliament ID. Never request `/politicians/{personId}/`.
 - Sponsor filtering is the OpenParliament-indexed subset; a bounded incomplete scan fails rather than inventing completeness.
+- Current-person crosswalks retain strict index and recorded-profile name precedence. Only an empty terminal exact-name page opens surname discovery and a different accent-folded surname query; each page and the deduplicated union admit at most three candidates. A unique profile must verify the official personId and a recorded name or usable published alias, comparing accents and optional interior single-letter initials locally. Source names remain unchanged.
 - Current-member search filters the complete roster. Historical name lookup stays sparse and rejects unsupported geographic/caucus filters.
 - Speech `contains` is a bounded scan with raw-offset continuation and `exhausted`. Hydrate affiliations from dated memberships, never current attributes.
-- One 24,000-byte complete-response budget and measure (`_format.ts`) bound `canparl_get_bill`, `canparl_get_vote`, and `canparl_search_speeches`; they render every enrichment field through `renderValue` so the measure equals the wire. Large bill dossiers return an outline; pages hold whole records and stop before the one that would exceed the budget, returning at least one; oversized indivisible records return with disclosure.
+- One 24,000-byte complete-response budget and measure (`_format.ts`) bound `canparl_get_bill`, `canparl_get_vote`, and all four search tools; final notices and every enrichment field render through `renderValue` so the measure equals the wire. Large bill dossiers return an outline; pages preserve whole records, stop before the first that would exceed the budget, and return at least one when records exist; oversized indivisible records return with disclosure. Current searches advance by delivered rows; historical member pages preserve upstream nextOffset when delivered in full, otherwise resume at input offset plus delivered rows. Count acceptance, caps, and exact current totals stay unchanged.
 - Preserve source-specific vote vocabulary and full tallies independently of ballot-page filters. `canparl_get_member` ballots keep OpenParliament's `Yes`/`No` in `ballot` on every row and carry the official `Yea`/`Nay`/`Paired` in `officialBallot`.
 - Profile links are never fetched: an absolute `http` or `https` URL without credentials is relayed as published, any other non-empty value is resolved against `https://openparliament.ca`, and empty, credentialed, `mailto:`, `javascript:`, `data:`, and `ftp:` values are rejected; only `https://` values render as links.
 - Tests run real parsers/services/handlers through synthetic fake HTTP responses, not mocked domain service methods.

@@ -54,6 +54,46 @@ describe('LegisinfoService network contract', () => {
   const sessions = (values?: string[]) =>
     http.route({ match: picker, respond: new Response(html(values)) });
 
+  it('does not retry an official 403 or cache the failure', async () => {
+    http.route(
+      {
+        match: current,
+        once: true,
+        respond: new Response('<html>Access denied</html>', { status: 403 }),
+      },
+      { match: current, respond: Response.json([bill]) },
+    );
+    await expect(settle(service.getCurrentSession(budget))).rejects.toMatchObject({
+      data: { status: 403 },
+    });
+    expect(http.calls).toHaveLength(1);
+    expect((await settle(service.getCurrentSession(budget))).data).toBe('45-1');
+    expect((await service.getCurrentSession(budget)).provenance[0]?.cached).toBe(true);
+    expect(http.calls).toHaveLength(2);
+  });
+
+  it('classifies a source refusal without exposing the upstream body', async () => {
+    http.route({
+      match: current,
+      respond: new Response('<html>private refusal marker</html>', { status: 403 }),
+    });
+    const error = await settle(service.getCurrentSession(budget)).catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'LEGISinfo refused the official data request.',
+      data: {
+        reason: 'upstream_blocked',
+        source: 'legisinfo',
+        status: 403,
+        retryable: false,
+        recovery: { hint: 'Retry LEGISinfo later for official parliamentary data.' },
+      },
+    });
+    expect(error).not.toHaveProperty('data.body');
+    expect(error).not.toHaveProperty('data.responseBody');
+    expect(JSON.stringify(error)).not.toContain('private refusal marker');
+    expect(http.calls).toHaveLength(1);
+  });
   it('builds only canonical allowlisted requests and supplies manual redirects and headers', async () => {
     sessions();
     http.route({ match: detail, respond: Response.json([bill]) });

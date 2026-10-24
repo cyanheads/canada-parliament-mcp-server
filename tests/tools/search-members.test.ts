@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PROVINCES } from '@/domain/normalization.js';
 import { PARTIES } from '@/domain/reference-catalog.js';
 import { searchMembersTool } from '@/mcp-server/tools/definitions/search-members.tool.js';
+import { assertMeasuredResponse } from '../fixtures/bill-tools/harness.js';
 import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
 import {
   collection,
@@ -47,6 +48,76 @@ describe('canparl_search_members production contract', () => {
       ),
     });
   it.each([
+    [false, 1500],
+    [true, 1500],
+    [false, 15000],
+    [true, 15000],
+  ] as const)(
+    'fits current/historical mode %j with %i-character names and resumes every whole row',
+    async (includeFormer, size) => {
+      const name = 'é'.repeat(size);
+      if (includeFormer) {
+        for (let offset = 0; offset < 8; offset++)
+          page(
+            http,
+            '/politicians/',
+            { limit: 100, offset, include: 'all' },
+            Array.from({ length: 8 - offset }, (_, i) => ({
+              name,
+              url: `/politicians/member-${offset + i + 1}/`,
+            })),
+          );
+      } else
+        http.route({
+          match: rosterUrl,
+          respond: new Response(
+            collection(
+              'ArrayOfMemberOfParliament',
+              'MemberOfParliament',
+              Array.from({ length: 8 }, (_, i) =>
+                rawPerson(i + 1, {
+                  PersonOfficialFirstName: name,
+                  PersonOfficialLastName: 'Repeated',
+                }),
+              ),
+            ),
+          ),
+        });
+      const ids: string[] = [];
+      let offset: number | null = 0;
+      let pages = 0;
+      do {
+        const result = await call({ includeFormer, limit: 10_000, offset });
+        const data = parity(result, searchMembersTool) as {
+          members: { personId: string | null; slug: string | null; name: string }[];
+          pagination: { nextOffset: number | null };
+        };
+        const bytes = assertMeasuredResponse(result, searchMembersTool, data.members);
+        if (bytes > 24_000)
+          expect(result.structuredContent).toMatchObject({
+            shown: 1,
+            notice: expect.stringContaining('exceeds'),
+          });
+        expect(data.members.length).toBeGreaterThan(0);
+        expect(result.structuredContent).toMatchObject({
+          total: includeFormer ? null : 8,
+          cap: 100,
+          notice: expect.stringContaining('maximum of 100'),
+        });
+        for (const row of data.members)
+          expect(row.name).toBe(includeFormer ? name : `${name} Repeated`);
+        ids.push(...data.members.map((row) => (includeFormer ? row.slug! : row.personId!)));
+        offset = data.pagination.nextOffset;
+        if (offset !== null) expect(offset).toBe(ids.length);
+        expect(++pages).toBeLessThanOrEqual(8);
+      } while (offset !== null);
+      expect(pages).toBeGreaterThan(1);
+      expect(ids).toEqual(
+        Array.from({ length: 8 }, (_, i) => (includeFormer ? `member-${i + 1}` : String(i + 1))),
+      );
+    },
+  );
+  it.each([
     [{}, ['1', '2', '3']],
     [{ limit: 2 }, ['1', '2']],
     [{ limit: 3 }, ['1', '2', '3']],
@@ -66,7 +137,7 @@ describe('canparl_search_members production contract', () => {
         .slice(1)
         .map((block) => (block.type === 'text' ? block.text : ''))
         .join('\n'),
-    ).toContain(`**${data.totalCount} total**`);
+    ).toContain(`totalCount: ${data.totalCount}`);
     expect(http.calls).toHaveLength(1);
     expect(data).toMatchObject({
       cap: 'limit' in input ? input.limit : 25,
@@ -125,23 +196,28 @@ describe('canparl_search_members production contract', () => {
       ),
     });
     const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
-    const first = parity(await call({ limit }), searchMembersTool);
-    expect(first).toMatchObject({
-      total: 150,
-      shown: 100,
-      cap: 100,
-      truncated: true,
-      pagination: { offset: 0, limit: 100, nextOffset: 100, hasMore: true },
-      notice,
-    });
-    const rest = parity(await call({ limit, offset: 100 }), searchMembersTool);
-    expect(rest).toMatchObject({
-      shown: 50,
-      cap: 100,
-      pagination: { offset: 100, limit: 100, nextOffset: null, hasMore: false },
-      notice,
-    });
-    expect((rest.members as { personId: string }[]).at(-1)?.personId).toBe('150');
+    const ids: string[] = [];
+    let offset: number | null = 0;
+    do {
+      const result = await call({ limit, offset });
+      const data = parity(result, searchMembersTool) as {
+        members: { personId: string }[];
+        pagination: { nextOffset: number | null };
+      };
+      assertMeasuredResponse(result, searchMembersTool, data.members);
+      expect(result.structuredContent).toMatchObject({
+        total: 150,
+        cap: 100,
+        notice: expect.stringContaining(notice),
+        pagination: { offset, limit: 100 },
+      });
+      expect(data.members.length).toBeGreaterThan(0);
+      ids.push(...data.members.map((row) => row.personId));
+      offset = data.pagination.nextOffset;
+      if (offset !== null) expect(offset).toBe(ids.length);
+      expect(ids.length).toBeLessThanOrEqual(150);
+    } while (offset !== null);
+    expect(ids).toEqual(Array.from({ length: 150 }, (_, i) => String(i + 1)));
   });
   it.each([150, 10_000])(
     'requests a historical page of 100 for limit %i and discloses the clamp',
@@ -188,6 +264,51 @@ describe('canparl_search_members production contract', () => {
       truncated: false,
       pagination: { nextOffset: null, hasMore: false },
     });
+  });
+  it('preserves an explicit source continuation on an empty historical page', async () => {
+    page(http, '/politicians/', { limit: 25, offset: 7, include: 'all' }, [], 12);
+    const data = parity(await call({ includeFormer: true, offset: 7 }), searchMembersTool);
+    expect(data).toMatchObject({
+      total: null,
+      shown: 0,
+      truncated: true,
+      pagination: { offset: 7, nextOffset: 12, hasMore: true },
+      notice: expect.stringContaining('offset 0'),
+    });
+  });
+  it('resumes inside a shortened historical page before following its source gap', async () => {
+    const rows = Array.from({ length: 4 }, (_, i) => ({
+      name: 'é'.repeat(1500),
+      url: `/politicians/gap-${i + 7}/`,
+    }));
+    for (let offset = 7; offset < 11; offset++)
+      page(
+        http,
+        '/politicians/',
+        { limit: 100, offset, include: 'all' },
+        rows.slice(offset - 7),
+        12,
+      );
+    page(http, '/politicians/', { limit: 100, offset: 12, include: 'all' }, [
+      { name: 'Final', url: '/politicians/gap-12/' },
+    ]);
+    const ids: string[] = [];
+    const offsets: number[] = [];
+    let offset: number | null = 7;
+    do {
+      offsets.push(offset);
+      const result = await call({ includeFormer: true, limit: 100, offset });
+      const data = parity(result, searchMembersTool) as {
+        members: { slug: string }[];
+        pagination: { nextOffset: number | null };
+      };
+      assertMeasuredResponse(result, searchMembersTool, data.members);
+      ids.push(...data.members.map((row) => row.slug));
+      offset = data.pagination.nextOffset;
+      expect(offsets.length).toBeLessThanOrEqual(5);
+    } while (offset !== null);
+    expect(ids).toEqual(['gap-7', 'gap-8', 'gap-9', 'gap-10', 'gap-12']);
+    expect(offsets).toEqual([7, 10, 12]);
   });
   const provinces = [...Object.values(PROVINCES), ...Object.keys(PROVINCES)];
   it.each<[Record<string, string>, FilterRejection]>([

@@ -171,3 +171,28 @@ export function responseBytes(body: unknown, enrichment: JsonRecord): number {
     'utf8',
   );
 }
+
+/**
+ * Choose the largest whole-record prefix whose final body and enrichment fit the response budget.
+ * `build` includes continuation and the supplied notice in the measured response. Empty pages
+ * retain their source continuation; an indivisible oversized first record is returned whole.
+ */
+export function fitResponsePage<T, E extends JsonRecord>(
+  available: number,
+  toolName: string,
+  build: (count: number, notice?: string) => { result: T; enriched: E },
+): { result: T; enriched: E } {
+  const full = build(available);
+  if (available === 0 || responseBytes(full.result, full.enriched) <= RESPONSE_BUDGET) return full;
+  for (let count = available - 1; count >= 1; count--) {
+    const page = build(
+      count,
+      `The ${RESPONSE_BUDGET}-byte response budget ended this page after ${count} ${count === 1 ? 'record' : 'records'}; call ${toolName} with nextOffset and identical filters to continue.`,
+    );
+    if (responseBytes(page.result, page.enriched) <= RESPONSE_BUDGET) return page;
+  }
+  return build(
+    1,
+    `One complete record exceeds the ${RESPONSE_BUDGET}-byte response budget and is returned whole; follow nextOffset with identical filters when present.`,
+  );
+}

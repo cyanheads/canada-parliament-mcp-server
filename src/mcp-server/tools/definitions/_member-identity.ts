@@ -16,11 +16,28 @@ import { getOurCommonsService, type OurCommonsMember } from '@/services/ourcommo
 /** Decimal official personId; a digit-only slug input may be one. */
 export const PERSON_ID = /^\d+$/;
 
+function foldAccents(value: string): string {
+  return value.normalize('NFD').replace(/\p{M}/gu, '').normalize('NFC');
+}
+
+/** Only interior single-letter initials are optional; full given names remain distinct. */
+function identityName(value: string): string {
+  const words = vocabularyKey(foldAccents(value)).split(' ');
+  return words
+    .filter((word, index) => {
+      if (index === 0 || index === words.length - 1) return true;
+      const initial = word.endsWith('.') ? word.slice(0, -1) : word;
+      return !/^[a-z]$/.test(initial);
+    })
+    .join(' ');
+}
+
 /**
- * The one OpenParliament profile verified for a current member: exact normalized full-name
- * candidates from a single bounded name page (at most three), each required to list the official
- * personId. Null when the page has a continuation or a fourth row, or no unique profile verifies;
- * source failures propagate. Never requests `/politicians/{personId}/`.
+ * Verify one profile by recorded name or published alias and official personId; existing exact
+ * name/profile matches take precedence. An empty exact name page permits surname and different
+ * accent-folded surname pages. Every page and the union
+ * must be complete with at most three unique candidates; source failures propagate. Never
+ * requests `/politicians/{personId}/`.
  */
 export async function crosswalkProfile(
   official: OurCommonsMember,
@@ -34,18 +51,45 @@ export async function crosswalkProfile(
   );
   provenance.push(...candidates.provenance);
   if (candidates.nextOffset !== null || candidates.objects.length > 3) return null;
-  const name = vocabularyKey(official.name);
+  const name = identityName(official.name);
+  const exact = candidates.objects.filter(
+    (row) => vocabularyKey(row.name) === vocabularyKey(official.name),
+  );
+  // Preserve existing exact-name successes and their request count before considering variants.
+  const named =
+    exact.length > 0 ? exact : candidates.objects.filter((row) => identityName(row.name) === name);
+  const identifiers = new Set(named.map((row) => row.slug));
+  if (candidates.objects.length === 0) {
+    const surnames = new Set([official.lastName, foldAccents(official.lastName)]);
+    for (const familyName of surnames) {
+      const page = await service.listPoliticians(
+        { include: 'all', familyName, limit: 4, offset: 0 },
+        request,
+      );
+      provenance.push(...page.provenance);
+      if (page.nextOffset !== null || page.objects.length > 3) return null;
+      for (const row of page.objects) identifiers.add(row.slug);
+      if (identifiers.size > 3) return null;
+    }
+  }
   const matches: PoliticianProfile[] = [];
-  for (const candidate of candidates.objects.filter((row) => vocabularyKey(row.name) === name)) {
-    const result = await service.getPolitician(candidate.slug, request);
+  const exactMatches: PoliticianProfile[] = [];
+  for (const slug of identifiers) {
+    const result = await service.getPolitician(slug, request);
     provenance.push(...result.provenance);
     if (
-      vocabularyKey(result.data.name) === name &&
+      [result.data.name, ...result.data.alternateNames].some(
+        (value) => identityName(value) === name,
+      ) &&
       result.data.personIds?.includes(official.personId)
-    )
+    ) {
       matches.push(result.data);
+      if (exact.length > 0 && vocabularyKey(result.data.name) === vocabularyKey(official.name))
+        exactMatches.push(result.data);
+    }
   }
-  return matches.length === 1 ? (matches[0] ?? null) : null;
+  const verified = exactMatches.length > 0 ? exactMatches : matches;
+  return verified.length === 1 ? (verified[0] ?? null) : null;
 }
 
 /**

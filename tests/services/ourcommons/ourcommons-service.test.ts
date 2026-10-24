@@ -51,6 +51,46 @@ describe('OurCommonsService network boundary', () => {
   };
   const sessions = () => http.route({ match: picker, respond: new Response(html) });
 
+  it('does not retry an official 403 or cache the failure', async () => {
+    http.route(
+      {
+        match: roster,
+        once: true,
+        respond: new Response('<html>Access denied</html>', { status: 403 }),
+      },
+      { match: roster, respond: new Response(xmlMembers) },
+    );
+    await expect(settle(service.listMembers(budget))).rejects.toMatchObject({
+      data: { status: 403 },
+    });
+    expect(http.calls).toHaveLength(1);
+    expect((await settle(service.listMembers(budget))).data).toHaveLength(1);
+    expect((await service.listMembers(budget)).provenance[0]?.cached).toBe(true);
+    expect(http.calls).toHaveLength(2);
+  });
+
+  it('classifies a source refusal without exposing the upstream body', async () => {
+    http.route({
+      match: roster,
+      respond: new Response('<html>private refusal marker</html>', { status: 403 }),
+    });
+    const error = await settle(service.listMembers(budget)).catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'OurCommons refused the official data request.',
+      data: {
+        reason: 'upstream_blocked',
+        source: 'ourcommons',
+        status: 403,
+        retryable: false,
+        recovery: { hint: 'Retry OurCommons later for official parliamentary data.' },
+      },
+    });
+    expect(error).not.toHaveProperty('data.body');
+    expect(error).not.toHaveProperty('data.responseBody');
+    expect(JSON.stringify(error)).not.toContain('private refusal marker');
+    expect(http.calls).toHaveLength(1);
+  });
   it('bounds cached participant arrays and refetches evicted records', async () => {
     sessions();
     http.route({

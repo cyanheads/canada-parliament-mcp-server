@@ -59,7 +59,11 @@ describe('actual parliament application over stdio', () => {
           .map((block) => block.text ?? '')
           .join('\n'),
       ).text;
-      if (totalCount !== undefined) expect(trailer).toContain(`${String(totalCount)} total`);
+      if (totalCount !== undefined) {
+        const fields = trailerFields(result.content.slice(1));
+        if ('totalCount' in fields) expectExact(fields.totalCount, totalCount);
+        else expect(trailer).toContain(`${String(totalCount)} total`);
+      }
       for (const [key, value] of Object.entries({ shown, cap, truncated }))
         if (value !== undefined) expect(trailer).toContain(`${key}: ${String(value)}`);
       if (notice !== undefined) expect(trailer).toContain(String(notice));

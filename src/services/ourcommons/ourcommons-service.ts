@@ -71,6 +71,7 @@ export class OurCommonsService {
               {
                 signal,
                 redirect: 'manual',
+                errorBodyLimit: 0,
                 headers: {
                   'User-Agent': this.config.userAgent,
                   Accept: html ? 'text/html' : 'application/xml',
@@ -106,6 +107,14 @@ export class OurCommonsService {
       },
     ).catch((error: unknown) => {
       request.throwIfAborted();
+      if (error instanceof McpError && error.data?.status === 403)
+        throw serviceUnavailable('OurCommons refused the official data request.', {
+          reason: 'upstream_blocked',
+          source: 'ourcommons',
+          status: 403,
+          retryable: false,
+          recovery: { hint: 'Retry OurCommons later for official parliamentary data.' },
+        });
       throw error;
     });
     for (const [key, entry] of this.cache)

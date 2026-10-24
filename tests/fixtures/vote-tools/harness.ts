@@ -62,7 +62,13 @@ export function collection(root: string, child: string, rows: Record<string, unk
 export function setup() {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-20T00:00:00Z'));
-  const http = createFetchMock();
+  const unexpected: string[] = [];
+  const http = createFetchMock([], {
+    onUnhandled: (request) => {
+      unexpected.push(request.url);
+      throw new Error(`Unexpected HTTP: ${request.url}`);
+    },
+  });
   http.install();
   initLegisinfoService({ userAgent: 'synthetic-vote-tests' });
   initOurCommonsService({ userAgent: 'synthetic-vote-tests' });
@@ -74,13 +80,14 @@ export function setup() {
         .join(''),
     ),
   });
-  return http;
+  return Object.assign(http, { unexpected });
 }
 export function teardown(http: ReturnType<typeof setup>) {
   disposeLegisinfoService();
   disposeOurCommonsService();
   http.restore();
   vi.useRealTimers();
+  expect(http.unexpected).toEqual([]);
 }
 export function votes(http: ReturnType<typeof setup>, rows = [rawVote()], session = '45-1') {
   http.route({
@@ -106,6 +113,7 @@ type ToolResult = {
 };
 type Definition = {
   enrichment?: Record<string, unknown>;
+  enrichmentTrailer?: Record<string, { render?: unknown } | undefined> | undefined;
   output: { parse(value: unknown): unknown };
   format?: ((value: never) => readonly { type: string; text?: string }[]) | undefined;
 };
@@ -127,6 +135,10 @@ export function ballotParity(result: ToolResult, definition: Definition) {
 /** Check actual CommonMark leaves for both the tool body and every enrichment value. */
 export function parity(result: ToolResult, definition: Definition) {
   const data = domainParity(result, definition);
+  if (definition.enrichmentTrailer?.shown?.render) {
+    assertMeasuredResponse(result, definition, data.divisions as unknown[]);
+    return data;
+  }
   expectExact(trailerFields(result.content.slice(1)).appliedFilters, data.appliedFilters);
   const trailer = parseMarkdown(
     result.content

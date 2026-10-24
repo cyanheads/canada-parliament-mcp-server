@@ -265,6 +265,7 @@ export class LegisinfoService {
           {
             signal,
             redirect: 'manual',
+            errorBodyLimit: 0,
             errorHeaders: ['location', 'retry-after'],
             expectedStatuses: [301, 302, 303, 307, 308, 404],
             headers: {
@@ -278,6 +279,14 @@ export class LegisinfoService {
         request.throwIfAborted();
         if (!(error instanceof McpError)) throw error;
         const status = error.data?.status;
+        if (status === 403)
+          throw serviceUnavailable('LEGISinfo refused the official data request.', {
+            reason: 'upstream_blocked',
+            source: 'legisinfo',
+            status: 403,
+            retryable: false,
+            recovery: { hint: 'Retry LEGISinfo later for official parliamentary data.' },
+          });
         if (status === 404 && billDetail)
           throw notFound('The official bill dossier was not found.', {
             reason: 'bill_not_found',

@@ -234,6 +234,7 @@ export function parseMembership(value: unknown): Membership {
 export function parsePoliticianProfile(value: unknown): PoliticianProfile {
   const raw = record(value);
   const ids = nested(raw.other_info, 'parl_mp_id');
+  const aliases = nested(raw.other_info, 'alternate_name');
   let personIds: string[] | null = null;
   if (ids != null) {
     if (!Array.isArray(ids)) return malformed('parl_mp_id');
@@ -246,6 +247,9 @@ export function parsePoliticianProfile(value: unknown): PoliticianProfile {
   if (raw.links != null && !Array.isArray(raw.links)) return malformed('links');
   return {
     ...parsePolitician(raw),
+    alternateNames: Array.isArray(aliases)
+      ? aliases.filter((alias): alias is string => typeof alias === 'string' && alias.trim() !== '')
+      : [],
     personIds,
     givenName: text(raw.given_name),
     familyName: text(raw.family_name),

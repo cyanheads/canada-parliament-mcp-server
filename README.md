@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/canada-parliament-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/canada-parliament-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/canada-parliament-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/canada-parliament-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/canada-parliament-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/canada-parliament-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -16,6 +16,12 @@
 [![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/cyanheads/canada-parliament-mcp-server/releases/latest/download/canada-parliament-mcp-server.mcpb) [![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=canada-parliament-mcp-server&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBjeWFuaGVhZHMvY2FuYWRhLXBhcmxpYW1lbnQtbWNwLXNlcnZlciJdfQ==) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?%7B%22name%22%3A%22canada-parliament-mcp-server%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cyanheads%2Fcanada-parliament-mcp-server%22%5D%7D)
 
 [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-67E8F9?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
+
+</div>
+
+<div align="center">
+
+**Public Hosted Server:** [https://canada-parliament.caseyjhand.com/mcp](https://canada-parliament.caseyjhand.com/mcp)
 
 </div>
 
@@ -44,6 +50,7 @@ Canadian federal parliamentary records from [LEGISinfo](https://www.parl.ca/legi
 
 - `titleContains`, `billCode`, `originatingChamber`, `billType`, `status`, and `sponsor`, combined with AND; `limit` 1–100 (default 25; values up to 10,000 clamp to 100 with a notice) with offset pagination
 - Bilingual titles, status, latest major stage, and royal assent date, with the exact filtered `total` and `pagination.nextOffset`
+- Whole bill rows stop early at the 24,000-byte response budget; follow `pagination.nextOffset` with identical filters. An oversized single row returns whole with a notice
 - `sponsor` takes an OpenParliament slug, `/politicians/` path, or profile URL (`member.slug` from `canparl_get_member`, or an `includeFormer` search row), or a current MP's `personId`. A digit-only value equal to a current `personId`, or its `/politicians/<digits>/` path or URL, resolves through the same verified crosswalk as `canparl_get_member`; `appliedFilters.sponsorName` names the profile used
 - Sponsor results cover only OpenParliament's index (`sponsorCoverage: "openparliament_index"`), which excludes Senators; a scan past ten 100-row pages fails as `sponsor_scan_incomplete`
 
@@ -63,12 +70,14 @@ Canadian federal parliamentary records from [LEGISinfo](https://www.parl.ca/legi
 - Current roster: `name` and `riding` substrings, `province` (postal code or full name), and `party`; `limit` 1–100 (default 25; values up to 10,000 clamp to 100 with a notice) with the exact filtered `total`
 - `includeFormer: true` searches OpenParliament's historical name index instead: one token matches a surname, several match a full recorded name. Geographic and party filters are rejected there, rows may carry only a name and slug, and `total` is `null`
 - Pass `detailLookup` unchanged to `canparl_get_member`: current rows carry an official `personId`, historical rows an OpenParliament `slug`
+- Whole member rows stop early at the 24,000-byte response budget; follow `pagination.nextOffset` with identical filters. An oversized single row returns whole with a notice
 
 ---
 
 ### `canparl_get_member` <sub>tool</sub>
 
 - Exactly one `personId` or `slug` from `detailLookup`; returns the profile and dated `memberships`. A digit-only `slug` equal to a current `personId`, or its `/politicians/<digits>/` path or URL, is read as that `personId`
+- Current-person crosswalks verify the official ID and a recorded name or published alias; a bounded surname lookup after an empty exact-name page accommodates accents and middle initials without guessing a slug
 - `sponsoredBills` (0–5, default 5) and `recentVotes` (0–10, default 10) page independently through `billsOffset` and `votesOffset`; `0` skips a section, and values up to 10,000 clamp to the cap with a notice
 - With one official `personId`, ballots come newest first from the official member-votes feed in one request, for the member's latest session or `votesSession`, optionally narrowed by `votesBillCode`. `ballot` reads `Yes`/`No`/`Paired`, `officialBallot` keeps `Yea`/`Nay`/`Paired`, and `source` names the feed; other members keep OpenParliament ballots
 - Each activity section reports `available`, `unavailable`, or `not_requested`, with `failure` metadata; unavailable history is never reported as empty
@@ -80,6 +89,7 @@ Canadian federal parliamentary records from [LEGISinfo](https://www.parl.ca/legi
 
 - `billCode`, `result` (`Agreed To`, `Negatived`, `Tie`), `documentType`, inclusive Ottawa-date `dateFrom` and `dateTo`, and `subjectContains`; `limit` 1–100 (default 25; values up to 10,000 clamp to 100 with a notice) with offset pagination
 - Newest first, with official tallies and the exact filtered `total`; pass `session` and `number` to `canparl_get_vote`
+- Whole division rows stop early at the 24,000-byte response budget; follow `pagination.nextOffset` with identical filters. An oversized single row returns whole with a notice
 
 ---
 
@@ -116,6 +126,7 @@ Canadian Parliament-specific:
 - Bills cover both chambers; member, division, and speech tools cover the House of Commons. Missing historical fields stay `null`
 - Sessions accept `"45-1"` or `{ "parliament": 45, "session": 1 }`; an omitted session resolves from the current official bill feed, except in speech bill scopes
 - Shared source pacing, short-lived in-memory caches, retries, and one 50-second tool deadline. OpenParliament requests are serialized with a two-second start gap, so sponsored bills and OpenParliament ballots can take tens of seconds
+- Official-source HTTP 403 refusals fail with `upstream_blocked`, the source name, and guidance to retry that source later; response HTML is excluded, and official data is never replaced with another source
 
 Agent-friendly output:
 
@@ -124,6 +135,45 @@ Agent-friendly output:
 - Both surfaces: every `structuredContent` value, complete source text included, also renders in Markdown `content[]`
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://canada-parliament.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
+
+For Claude Code:
+
+```sh
+claude mcp add --transport http canada-parliament-mcp-server https://canada-parliament.caseyjhand.com/mcp
+```
+
+For Cline (`cline_mcp_settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "canada-parliament-mcp-server": {
+      "type": "streamableHttp",
+      "url": "https://canada-parliament.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+For Cursor (`mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "canada-parliament-mcp-server": {
+      "url": "https://canada-parliament.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+Claude Desktop adds remote servers under Settings → Connectors.
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 

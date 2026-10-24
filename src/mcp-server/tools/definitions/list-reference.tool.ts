@@ -131,6 +131,14 @@ export const listReferenceTool = tool('canparl_list_reference', {
       recovery: 'Call canparl_list_reference with topic sessions and omit the session argument.',
       retryable: false,
     },
+    {
+      reason: 'upstream_blocked',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'An official parliamentary source refuses the request with HTTP 403.',
+      recovery: 'Retry the affected official source later for parliamentary data.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     const request = createRequestContext(ctx);

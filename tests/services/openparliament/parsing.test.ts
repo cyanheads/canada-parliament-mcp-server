@@ -32,6 +32,25 @@ const ballot = { vote_url: vote.url, politician_url: actor.url, ballot: 'Yes' };
 const speech = { url: '/debates/2026/10/20/1/', time: '2026-10-20 12:30:00' };
 
 describe('OpenParliament source records', () => {
+  it('retains only usable published alias strings as identity evidence', () => {
+    expect(
+      parsePoliticianProfile({
+        ...actor,
+        other_info: {
+          alternate_name: ['Judy A. Sgro', 'judy sgro', null, 12, {}, ''],
+        },
+      }),
+    ).toMatchObject({ alternateNames: ['Judy A. Sgro', 'judy sgro'] });
+  });
+  it.each([42, {}, [null, 12, { name: 'irrelevant' }]])(
+    'accepts otherwise valid profiles with irrelevant optional alias data %j',
+    (alternate_name) => {
+      expect(parsePoliticianProfile({ ...actor, other_info: { alternate_name } })).toMatchObject({
+        name: actor.name,
+        slug: 'synthetic-member',
+      });
+    },
+  );
   it('preserves sparse historical index and profile uncertainty', () => {
     expect(parsePolitician(actor)).toEqual({
       slug: 'synthetic-member',

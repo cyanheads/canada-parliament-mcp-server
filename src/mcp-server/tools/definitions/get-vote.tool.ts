@@ -188,6 +188,14 @@ export const getVoteTool = tool('canparl_get_vote', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'upstream_blocked',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'An official parliamentary source refuses the request with HTTP 403.',
+      recovery: 'Retry the affected official source later for parliamentary data.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     const request = createRequestContext(ctx);

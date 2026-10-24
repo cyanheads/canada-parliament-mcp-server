@@ -4,6 +4,7 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { VOTE_DOCUMENT_TYPES } from '@/domain/reference-catalog.js';
 import { searchVotesTool } from '@/mcp-server/tools/definitions/search-votes.tool.js';
+import { assertMeasuredResponse } from '../fixtures/bill-tools/harness.js';
 import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
 import {
   current,
@@ -52,6 +53,45 @@ describe('canparl_search_votes production contract', () => {
       pagination: { offset: 0, limit: 2, hasMore: true, nextOffset: 2 },
     });
   });
+  it.each([1500, 15000])(
+    'fits complete divisions with repeated %i-character subjects',
+    async (size) => {
+      const subject = 'é'.repeat(size);
+      votes(
+        http,
+        Array.from({ length: 8 }, (_, i) => rawVote(i + 1, { DecisionDivisionSubject: subject })),
+      );
+      const ids: number[] = [];
+      let offset: number | null = 0;
+      let pages = 0;
+      do {
+        const result = await call({ session: '45-1', limit: 10_000, offset });
+        const data = parity(result, searchVotesTool) as {
+          divisions: { number: number; subject: string }[];
+          pagination: { nextOffset: number | null };
+        };
+        const bytes = assertMeasuredResponse(result, searchVotesTool, data.divisions);
+        expect(data.divisions.length).toBeGreaterThan(0);
+        expect(result.structuredContent).toMatchObject({
+          total: 8,
+          cap: 100,
+          notice: expect.stringContaining('maximum of 100'),
+        });
+        for (const row of data.divisions) expect(row.subject).toBe(subject);
+        if (bytes > 24_000)
+          expect(result.structuredContent).toMatchObject({
+            shown: 1,
+            notice: expect.stringContaining('exceeds'),
+          });
+        ids.push(...data.divisions.map((row) => row.number));
+        offset = data.pagination.nextOffset;
+        if (offset !== null) expect(offset).toBe(ids.length);
+        expect(++pages).toBeLessThanOrEqual(8);
+      } while (offset !== null);
+      expect(pages).toBeGreaterThan(1);
+      expect(ids).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
+    },
+  );
   it('intersects canonical aliases and inclusive Ottawa dates with literal Unicode subjects', async () => {
     votes(http, rows);
     const result = await call({
@@ -118,15 +158,21 @@ describe('canparl_search_votes production contract', () => {
     });
     expect(http.calls.some((call) => call.request.url === current)).toBe(false);
   });
-  it('returns every row at the maximum cap', async () => {
+  it('preserves the maximum cap while disclosing the response-budget stop', async () => {
     votes(
       http,
       Array.from({ length: 100 }, (_, i) => rawVote(i + 1)),
     );
     const result = await call({ session: '45-1', limit: 100 });
     parity(result, searchVotesTool);
-    expect(result.structuredContent).toMatchObject({ total: 100, shown: 100, truncated: false });
-    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(result.structuredContent).toMatchObject({
+      total: 100,
+      shown: 31,
+      cap: 100,
+      truncated: true,
+      pagination: { nextOffset: 31 },
+      notice: expect.stringContaining('24000-byte response budget'),
+    });
   });
   it.each([101, 10_000])(
     'clamps limit %i to the 100-row cap and continues from nextOffset',
@@ -136,24 +182,27 @@ describe('canparl_search_votes production contract', () => {
         Array.from({ length: 150 }, (_, i) => rawVote(i + 1)),
       );
       const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
-      const first = parity(await call({ session: '45-1', limit }), searchVotesTool);
-      expect(first).toMatchObject({
-        total: 150,
-        shown: 100,
-        cap: 100,
-        truncated: true,
-        pagination: { offset: 0, limit: 100, nextOffset: 100, hasMore: true },
-        notice,
-      });
-      expect((first.divisions as { number: number }[]).at(-1)?.number).toBe(51);
-      const rest = parity(await call({ session: '45-1', limit, offset: 100 }), searchVotesTool);
-      expect(rest).toMatchObject({
-        shown: 50,
-        cap: 100,
-        truncated: false,
-        pagination: { offset: 100, limit: 100, nextOffset: null, hasMore: false },
-        notice,
-      });
+      const ids: number[] = [];
+      let offset: number | null = 0;
+      do {
+        const result = await call({ session: '45-1', limit, offset });
+        const data = parity(result, searchVotesTool) as {
+          divisions: { number: number }[];
+          pagination: { nextOffset: number | null };
+        };
+        expect(result.structuredContent).toMatchObject({
+          total: 150,
+          cap: 100,
+          notice: expect.stringContaining(notice),
+          pagination: { offset, limit: 100 },
+        });
+        expect(data.divisions.length).toBeGreaterThan(0);
+        ids.push(...data.divisions.map((row) => row.number));
+        offset = data.pagination.nextOffset;
+        if (offset !== null) expect(offset).toBe(ids.length);
+        expect(ids.length).toBeLessThanOrEqual(150);
+      } while (offset !== null);
+      expect(ids).toEqual(Array.from({ length: 150 }, (_, i) => 150 - i));
     },
   );
   const bill = 'Expected a House or Senate bill code such as C-15';

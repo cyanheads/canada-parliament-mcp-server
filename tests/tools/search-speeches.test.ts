@@ -928,6 +928,53 @@ describe('canparl_search_speeches speaker identity', () => {
       `${api}${actor}`,
     ]);
   });
+  it('resolves Judy Sgro through the surname fallback for politician personId 1787', async () => {
+    const judy = '/politicians/judy-sgro/';
+    http.route({
+      match: rosterUrl,
+      respond: new Response(
+        collection('ArrayOfMemberOfParliament', 'MemberOfParliament', [
+          rawPerson(1787, { PersonOfficialFirstName: 'Judy A.', PersonOfficialLastName: 'Sgro' }),
+        ]),
+      ),
+    });
+    const exact = `${api}/politicians/?limit=4&offset=0&include=all&name=Judy+A.+Sgro`;
+    const surname = `${api}/politicians/?limit=4&offset=0&include=all&family_name=Sgro`;
+    http.route(
+      {
+        match: exact,
+        respond: Response.json({
+          objects: [],
+          pagination: { offset: 0, limit: 4, next_url: null },
+        }),
+      },
+      {
+        match: surname,
+        respond: Response.json({
+          objects: [{ url: judy, name: 'Judy Sgro' }],
+          pagination: { offset: 0, limit: 4, next_url: null },
+        }),
+      },
+    );
+    politician(judy, {
+      name: 'Judy Sgro',
+      other_info: { parl_mp_id: ['1787'], alternate_name: ['judy a. sgro'] },
+    });
+    pages(http, [speech(1, { politician_url: judy })], {
+      politician: judy,
+      time__gte: '2026-10-01',
+    });
+    expect(parity(await call({ politician: '1787' }), searchSpeechesTool)).toMatchObject({
+      speeches: [{ politician: 'judy-sgro' }],
+      appliedFilters: { politician: 'judy-sgro', politicianName: 'Judy Sgro' },
+    });
+    expect(urls().filter((url) => !new URL(url).pathname.startsWith('/speeches/'))).toEqual([
+      rosterUrl,
+      exact,
+      surname,
+      `${api}${judy}`,
+    ]);
+  });
   it.each(['/politicians/2897/', 'https://api.openparliament.ca/politicians/2897/'])(
     'reads politician %j, holding a current personId, through the verified crosswalk',
     async (input) => {
@@ -951,6 +998,7 @@ describe('canparl_search_speeches speaker identity', () => {
     );
   });
   it.each([
+    ['no candidate', [] as string[], false],
     ['several verified candidates', [actor, '/politicians/river-example-2/'], false],
     ['a candidate page continuation', [actor], true],
   ])(
@@ -958,10 +1006,20 @@ describe('canparl_search_speeches speaker identity', () => {
     async (_case, paths, next) => {
       roster(2897);
       candidates(paths, next);
+      const surnamePage = `${api}/politicians/?limit=4&offset=0&include=all&family_name=Example`;
+      if (!paths.length)
+        http.route({
+          match: surnamePage,
+          respond: Response.json({
+            objects: [],
+            pagination: { offset: 0, limit: 4, next_url: null },
+          }),
+        });
       for (const path of paths) politician(path, { other_info: { parl_mp_id: ['2897'] } });
       failure(await call({ politician: '2897' }), notFound);
       expect(urls().filter((url) => url.startsWith(api))).toEqual([
         namePage,
+        ...(!paths.length ? [surnamePage] : []),
         ...(next ? [] : paths.map((path) => `${api}${path}`)),
       ]);
     },

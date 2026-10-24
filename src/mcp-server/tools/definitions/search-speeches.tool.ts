@@ -244,6 +244,14 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       recovery:
         'Narrow the dates or use canparl_get_bill/canparl_get_member to inspect source records before retrying canparl_search_speeches.',
     },
+    {
+      reason: 'upstream_blocked',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'An official parliamentary source refuses the request with HTTP 403.',
+      recovery: 'Retry the affected official source later for parliamentary data.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     const request = createRequestContext(ctx);

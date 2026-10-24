@@ -25,7 +25,7 @@ import {
 } from '@/domain/schemas.js';
 import { getOpenParliamentService } from '@/services/openparliament/index.js';
 import { getOurCommonsService } from '@/services/ourcommons/index.js';
-import { formatResult, renderValue } from './_format.js';
+import { fitResponsePage, formatResult, measuredTrailer } from './_format.js';
 
 /** Identifiers and known member attributes without inferred historical facts. */
 export const MemberSummarySchema = z
@@ -59,6 +59,34 @@ export const MemberSummarySchema = z
   .strict()
   .describe('Known public member identity.');
 
+const enrichment = {
+  totalCount: z
+    .number()
+    .int()
+    .optional()
+    .describe('Exact filtered current roster count; absent for historical searches.'),
+  appliedFilters: z
+    .object({
+      includeFormer: z.boolean().describe('Selected historical mode.'),
+      name: z.string().nullable().describe('Applied name text.'),
+      nameMode: z
+        .enum(['substring', 'surname', 'full_name', 'index'])
+        .describe('Actual source name matching semantics.'),
+      riding: z.string().nullable().describe('Applied riding substring.'),
+      province: z.string().nullable().describe('Canonical province name.'),
+      party: z.string().nullable().describe('Canonical official caucus.'),
+    })
+    .strict()
+    .describe('Normalized AND filters and name semantics.'),
+  shown: z.number().int().describe('Returned row count.'),
+  cap: z.number().int().describe('Effective page limit after the per-call cap.'),
+  truncated: z.boolean().describe('More queried rows remain.'),
+  notice: z
+    .string()
+    .optional()
+    .describe('Limit clamp, empty page, historical coverage, or response-budget guidance.'),
+};
+
 /** Search complete current roster or page the source historical name index. */
 export const searchMembersTool = tool('canparl_search_members', {
   description:
@@ -81,7 +109,9 @@ export const searchMembersTool = tool('canparl_search_members', {
     party: OptionalStringSchema.describe(
       'Official caucus name; Bloc and Green aliases accepted; current roster only.',
     ),
-    limit: LimitSchema,
+    limit: LimitSchema.describe(
+      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
+    ),
     offset: OffsetSchema,
   }),
   output: z.object({
@@ -94,36 +124,8 @@ export const searchMembersTool = tool('canparl_search_members', {
     pagination: PaginationSchema.describe('Continuation in the selected source ordering.'),
     provenance: z.array(SourceSchema).describe('Original source retrieval metadata.'),
   }),
-  enrichment: {
-    totalCount: z
-      .number()
-      .int()
-      .optional()
-      .describe('Exact filtered current roster count; absent for historical searches.'),
-    appliedFilters: z
-      .object({
-        includeFormer: z.boolean().describe('Selected historical mode.'),
-        name: z.string().nullable().describe('Applied name text.'),
-        nameMode: z
-          .enum(['substring', 'surname', 'full_name', 'index'])
-          .describe('Actual source name matching semantics.'),
-        riding: z.string().nullable().describe('Applied riding substring.'),
-        province: z.string().nullable().describe('Canonical province name.'),
-        party: z.string().nullable().describe('Canonical official caucus.'),
-      })
-      .strict()
-      .describe('Normalized AND filters and name semantics.'),
-    shown: z.number().int().describe('Returned row count.'),
-    cap: z.number().int().describe('Effective page limit after the per-call cap.'),
-    truncated: z.boolean().describe('More queried rows remain.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Limit clamp, empty page, or historical coverage guidance.'),
-  },
-  enrichmentTrailer: {
-    appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
-  },
+  enrichment,
+  enrichmentTrailer: measuredTrailer(enrichment),
   errors: [
     {
       reason: 'unsupported_historical_filter',
@@ -141,6 +143,14 @@ export const searchMembersTool = tool('canparl_search_members', {
         'Call canparl_list_reference with topic parties, then retry canparl_search_members with a listed caucus and a province code or full name.',
       retryable: false,
     },
+    {
+      reason: 'upstream_blocked',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'An official parliamentary source refuses the request with HTTP 403.',
+      recovery: 'Retry the affected official source later for parliamentary data.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
@@ -150,7 +160,11 @@ export const searchMembersTool = tool('canparl_search_members', {
       const limit = clampCount('limit', input.limit, LIST_CAP);
       const notices: string[] = limit.notice ? [limit.notice] : [];
       if (input.includeFormer) {
-        const nameMode = input.name ? (/\s/u.test(input.name) ? 'full_name' : 'surname') : 'index';
+        const nameMode: 'full_name' | 'surname' | 'index' = input.name
+          ? /\s/u.test(input.name)
+            ? 'full_name'
+            : 'surname'
+          : 'index';
         const page = await getOpenParliamentService().listPoliticians(
           {
             include: 'all',
@@ -165,9 +179,9 @@ export const searchMembersTool = tool('canparl_search_members', {
           request,
         );
         const members = page.objects.map((row) => ({
-          name: row.name,
-          slug: row.slug,
           personId: null,
+          slug: row.slug,
+          name: row.name,
           party: null,
           riding: null,
           province: null,
@@ -175,38 +189,50 @@ export const searchMembersTool = tool('canparl_search_members', {
           url: row.url,
           detailLookup: { slug: row.slug },
         }));
-        ctx.enrich({
-          appliedFilters: {
-            includeFormer: true,
-            name: input.name ?? null,
-            nameMode,
-            riding: null,
-            province: null,
-            party: null,
-          },
-          shown: members.length,
-          cap: limit.value,
-          truncated: page.nextOffset !== null,
-        });
         if (!members.length)
           notices.push(
             input.offset
               ? 'Retry canparl_search_members with offset 0 and the same filters.'
               : 'Try a surname alone or the full recorded name with canparl_search_members includeFormer true.',
           );
-        if (notices.length) ctx.enrich.notice(notices.join(' '));
-        request.throwIfAborted();
-        return {
-          total: null,
-          members,
-          pagination: {
-            offset: input.offset,
-            limit: limit.value,
-            nextOffset: page.nextOffset,
-            hasMore: page.nextOffset !== null,
+        const { result, enriched } = fitResponsePage(
+          members.length,
+          'canparl_search_members',
+          (count, budgetNotice) => {
+            const nextOffset = count < members.length ? input.offset + count : page.nextOffset;
+            const notice = [...notices, ...(budgetNotice ? [budgetNotice] : [])].join(' ');
+            return {
+              result: {
+                total: null,
+                members: members.slice(0, count),
+                pagination: {
+                  offset: input.offset,
+                  limit: limit.value,
+                  nextOffset,
+                  hasMore: nextOffset !== null,
+                },
+                provenance: page.provenance,
+              },
+              enriched: {
+                appliedFilters: {
+                  includeFormer: true,
+                  name: input.name ?? null,
+                  nameMode,
+                  riding: null,
+                  province: null,
+                  party: null,
+                },
+                shown: count,
+                cap: limit.value,
+                truncated: nextOffset !== null,
+                ...(notice ? { notice } : {}),
+              },
+            };
           },
-          provenance: page.provenance,
-        };
+        );
+        ctx.enrich(enriched);
+        request.throwIfAborted();
+        return result;
       }
       const roster = await getOurCommonsService().listMembers(request);
       let province: string | undefined;
@@ -238,35 +264,50 @@ export const searchMembersTool = tool('canparl_search_members', {
             a.personId.localeCompare(b.personId),
         );
       const page = paginate(rows, input.offset, limit.value);
-      const members = page.items.map(({ firstName: _first, lastName: _last, ...member }) => member);
-      ctx.enrich({
-        appliedFilters: {
-          includeFormer: false,
-          name: input.name ?? null,
-          nameMode: 'substring',
-          riding: input.riding ?? null,
-          province: province ?? null,
-          party: party ?? null,
-        },
-        shown: members.length,
-        cap: limit.value,
-        truncated: page.pagination.hasMore,
-      });
-      ctx.enrich.total(page.total);
+      const members = page.items.map(({ firstName: _first, lastName: _last, ...member }) =>
+        MemberSummarySchema.parse(member),
+      );
       if (!members.length)
         notices.push(
           input.offset && page.total
             ? 'Retry canparl_search_members with offset 0 and the same filters.'
             : 'No MPs matched; broaden name or riding and retry canparl_search_members.',
         );
-      if (notices.length) ctx.enrich.notice(notices.join(' '));
+      const { result, enriched } = fitResponsePage(
+        members.length,
+        'canparl_search_members',
+        (count, budgetNotice) => {
+          const nextOffset =
+            count < members.length ? input.offset + count : page.pagination.nextOffset;
+          const notice = [...notices, ...(budgetNotice ? [budgetNotice] : [])].join(' ');
+          return {
+            result: {
+              total: page.total,
+              members: members.slice(0, count),
+              pagination: { ...page.pagination, nextOffset, hasMore: nextOffset !== null },
+              provenance: roster.provenance,
+            },
+            enriched: {
+              totalCount: page.total,
+              appliedFilters: {
+                includeFormer: false,
+                name: input.name ?? null,
+                nameMode: 'substring' as const,
+                riding: input.riding ?? null,
+                province: province ?? null,
+                party: party ?? null,
+              },
+              shown: count,
+              cap: limit.value,
+              truncated: nextOffset !== null,
+              ...(notice ? { notice } : {}),
+            },
+          };
+        },
+      );
+      ctx.enrich(enriched);
       request.throwIfAborted();
-      return {
-        total: page.total,
-        members,
-        pagination: page.pagination,
-        provenance: roster.provenance,
-      };
+      return result;
     } finally {
       request.dispose();
     }

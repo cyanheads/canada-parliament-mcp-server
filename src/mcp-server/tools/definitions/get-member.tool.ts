@@ -387,6 +387,14 @@ export const getMemberTool = tool('canparl_get_member', {
         'Retry canparl_get_member with votesBillCode written like C-15, C-15A, or S-1001, or omit it.',
       retryable: false,
     },
+    {
+      reason: 'upstream_blocked',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'An official parliamentary source refuses the request with HTTP 403.',
+      recovery: 'Retry the affected official source later for parliamentary data.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     const request = createRequestContext(ctx);

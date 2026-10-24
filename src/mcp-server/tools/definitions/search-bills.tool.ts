@@ -28,9 +28,42 @@ import {
 } from '@/domain/schemas.js';
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
 import { getOpenParliamentService } from '@/services/openparliament/index.js';
-import { formatResult, renderValue } from './_format.js';
+import { fitResponsePage, formatResult, measuredTrailer } from './_format.js';
 import { resolvePolitician } from './_member-identity.js';
 import { BillSummarySchema } from './get-bill.tool.js';
+
+const enrichment = {
+  appliedFilters: z
+    .object({
+      session: z.string().describe('Resolved official session.'),
+      titleContains: z.string().nullable().describe('Trimmed literal title filter, or null.'),
+      billCode: z.string().nullable().describe('Canonical exact bill code, or null.'),
+      originatingChamber: z
+        .enum(['House', 'Senate'])
+        .nullable()
+        .describe('Canonical chamber, or null.'),
+      billType: z.string().nullable().describe('Canonical official bill type, or null.'),
+      status: z.string().nullable().describe('Canonical official status, or null.'),
+      sponsor: z
+        .string()
+        .nullable()
+        .describe('Verified canonical OpenParliament sponsor slug, or null.'),
+      sponsorName: z
+        .string()
+        .nullable()
+        .describe('Name on the verified OpenParliament sponsor profile, or null.'),
+    })
+    .strict()
+    .describe('Normalized filters applied together with AND.'),
+  totalCount: z.number().int().nonnegative().describe('Exact matching count before slicing.'),
+  shown: z.number().int().nonnegative().describe('Number of bills in this page.'),
+  cap: z.number().int().positive().describe('Effective page limit after the per-call cap.'),
+  truncated: z.boolean().describe('Whether more matching bills remain after this page.'),
+  notice: z
+    .string()
+    .optional()
+    .describe('Limit clamp, coverage, empty-result, past-end, or response-budget guidance.'),
+};
 
 /** Find official bills after applying all filters to the complete selected session. */
 export const searchBillsTool = tool('canparl_search_bills', {
@@ -58,7 +91,9 @@ export const searchBillsTool = tool('canparl_search_bills', {
     sponsor: OptionalStringSchema.describe(
       "MP OpenParliament slug or politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId; Senators are not indexed. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
     ),
-    limit: LimitSchema,
+    limit: LimitSchema.describe(
+      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
+    ),
     offset: OffsetSchema,
   }),
   output: z.object({
@@ -73,7 +108,9 @@ export const searchBillsTool = tool('canparl_search_bills', {
       .describe(
         'Matching official bills ordered by chamber prefix, number, then split-bill suffix letter.',
       ),
-    pagination: PaginationSchema.describe('Local continuation in the filtered ordering.'),
+    pagination: PaginationSchema.describe(
+      'Local continuation in the filtered ordering, including a response-budget stop.',
+    ),
     sponsorCoverage: z
       .enum(['not_applied', 'openparliament_index'])
       .describe('Whether the result is restricted to the third-party sponsor index.'),
@@ -81,41 +118,8 @@ export const searchBillsTool = tool('canparl_search_bills', {
       .array(SourceSchema)
       .describe('Original retrieval metadata from all source requests.'),
   }),
-  enrichment: {
-    appliedFilters: z
-      .object({
-        session: z.string().describe('Resolved official session.'),
-        titleContains: z.string().nullable().describe('Trimmed literal title filter, or null.'),
-        billCode: z.string().nullable().describe('Canonical exact bill code, or null.'),
-        originatingChamber: z
-          .enum(['House', 'Senate'])
-          .nullable()
-          .describe('Canonical chamber, or null.'),
-        billType: z.string().nullable().describe('Canonical official bill type, or null.'),
-        status: z.string().nullable().describe('Canonical official status, or null.'),
-        sponsor: z
-          .string()
-          .nullable()
-          .describe('Verified canonical OpenParliament sponsor slug, or null.'),
-        sponsorName: z
-          .string()
-          .nullable()
-          .describe('Name on the verified OpenParliament sponsor profile, or null.'),
-      })
-      .strict()
-      .describe('Normalized filters applied together with AND.'),
-    totalCount: z.number().int().nonnegative().describe('Exact matching count before slicing.'),
-    shown: z.number().int().nonnegative().describe('Number of bills in this page.'),
-    cap: z.number().int().positive().describe('Effective page limit after the per-call cap.'),
-    truncated: z.boolean().describe('Whether more matching bills remain after this page.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Limit clamp, coverage, empty-result, or past-end guidance.'),
-  },
-  enrichmentTrailer: {
-    appliedFilters: { render: (value) => renderValue(value, 'appliedFilters') },
-  },
+  enrichment,
+  enrichmentTrailer: measuredTrailer(enrichment),
   errors: [
     {
       reason: 'unknown_session',
@@ -148,6 +152,14 @@ export const searchBillsTool = tool('canparl_search_bills', {
       recovery:
         'Call canparl_search_bills without sponsor and inspect a specific result with canparl_get_bill.',
       retryable: false,
+    },
+    {
+      reason: 'upstream_blocked',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'An official parliamentary source refuses the request with HTTP 403.',
+      recovery: 'Retry the affected official source later for parliamentary data.',
+      retryable: false,
+      thrownBy: 'service',
     },
   ],
   async handler(input, ctx) {
@@ -236,22 +248,6 @@ export const searchBillsTool = tool('canparl_search_bills', {
             a.billCode.localeCompare(b.billCode),
         );
       const page = paginate(filtered, input.offset, limit.value);
-      ctx.enrich({
-        appliedFilters: {
-          session,
-          titleContains: input.titleContains ?? null,
-          billCode,
-          originatingChamber,
-          billType,
-          status,
-          sponsor,
-          sponsorName,
-        },
-        shown: page.items.length,
-        cap: limit.value,
-        truncated: page.pagination.hasMore,
-      });
-      ctx.enrich.total(page.total);
       const notices: string[] = [];
       if (limit.notice) notices.push(limit.notice);
       if (page.total === 0)
@@ -266,16 +262,46 @@ export const searchBillsTool = tool('canparl_search_bills', {
         notices.push(
           'This offset is past the matching bills; retry canparl_search_bills with offset 0.',
         );
-      if (notices.length) ctx.enrich.notice(notices.join(' '));
+      const { result: response, enriched } = fitResponsePage(
+        page.items.length,
+        'canparl_search_bills',
+        (count, budgetNotice) => {
+          const selected = paginate(filtered, input.offset, count);
+          const notice = [...notices, ...(budgetNotice ? [budgetNotice] : [])].join(' ');
+          return {
+            result: {
+              session,
+              total: page.total,
+              bills: selected.items,
+              pagination: { ...selected.pagination, limit: limit.value },
+              sponsorCoverage: sponsor
+                ? ('openparliament_index' as const)
+                : ('not_applied' as const),
+              provenance,
+            },
+            enriched: {
+              appliedFilters: {
+                session,
+                titleContains: input.titleContains ?? null,
+                billCode,
+                originatingChamber,
+                billType,
+                status,
+                sponsor,
+                sponsorName,
+              },
+              totalCount: page.total,
+              shown: selected.items.length,
+              cap: limit.value,
+              truncated: selected.pagination.hasMore,
+              ...(notice ? { notice } : {}),
+            },
+          };
+        },
+      );
+      ctx.enrich(enriched);
       request.throwIfOuterAborted();
-      return {
-        session,
-        total: page.total,
-        bills: page.items,
-        pagination: page.pagination,
-        sponsorCoverage: sponsor ? ('openparliament_index' as const) : ('not_applied' as const),
-        provenance,
-      };
+      return response;
     } finally {
       request.dispose();
     }

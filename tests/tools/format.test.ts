@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { type JsonRecord, JsonRecordSchema, JsonValueSchema } from '@/domain/schemas.js';
 import {
   encodeText,
+  fitResponsePage,
   formatResult,
   measuredTrailer,
   RESPONSE_BUDGET,
@@ -381,6 +382,53 @@ describe('complete-response byte budget', () => {
     const selected = cases[1] as Case;
     expect(responseBytes(selected.body, selected.enrichment)).not.toBe(wire(result));
   });
+  it.each([0, 1, 4])(
+    'fits %i available records using final enrichment and notices',
+    async (available) => {
+      const definition = tool('probe_fit', {
+        description: 'Return whole records under the shared complete-response byte budget.',
+        input: z.object({}),
+        output,
+        enrichment,
+        enrichmentTrailer: measuredTrailer(enrichment),
+        handler(_input, ctx) {
+          const selected = fitResponsePage(available, 'probe_fit', (count, notice) => ({
+            result: {
+              items: Array.from({ length: count }, (_, id) => ({ id, repeated: 'x'.repeat(4000) })),
+              meta: { nested: { labels: ['200', 200, null] } },
+              note: null,
+            },
+            enriched: {
+              appliedFilters: { session: '45-1', code: null },
+              shown: count,
+              truncated: count < available,
+              ...(notice ? { notice } : {}),
+            },
+          }));
+          ctx.enrich(selected.enriched);
+          return selected.result;
+        },
+        format: (result) => formatResult(result),
+      });
+      const result = await runToolContract(definition, {});
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        shown: available === 4 ? 2 : available,
+        truncated: available === 4,
+      });
+      expect(wire(result)).toBeLessThanOrEqual(24_000);
+      const data = JsonRecordSchema.parse(result.structuredContent);
+      roundTrip(
+        data,
+        result.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n'),
+      );
+      if (available === 4) expect(data.notice).toContain('24000-byte response budget');
+      else expect(data).not.toHaveProperty('notice');
+    },
+  );
 });
 
 /**

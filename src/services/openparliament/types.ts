@@ -33,6 +33,7 @@ export interface Membership {
 }
 /** Profile fields needed for verified identity and historical attribution. */
 export interface PoliticianProfile extends Politician {
+  alternateNames: string[];
   familyName: string | null;
   gender: string | null;
   givenName: string | null;
