@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-10-24
+
+Verified member identity variants and bounded search pages with explicit official-source refusals.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-10-21
 
 Bill dossiers gain legislative summaries, notes, web references, and reading milestones; member ballots come from the official feed; vote ballots filter by value and member; bill, vote, and speech replies share one 24,000-byte budget; member-identity, split-bill-code, and rendering bugs fixed.

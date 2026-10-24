@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-21 08:38:53
+Generated on: 2026-10-24 18:58:44
 
 ```text
 canada-parliament-mcp-server/
@@ -229,6 +229,7 @@ canada-parliament-mcp-server/
 │       ├── get-vote.test.ts
 │       ├── list-reference.test.ts
 │       ├── member-identity.test.ts
+│       ├── official-source-errors.test.ts
 │       ├── search-bills.test.ts
 │       ├── search-members.test.ts
 │       ├── search-speeches.test.ts
