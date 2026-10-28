@@ -3,7 +3,6 @@
 /.claude/
 /.agents/
 /framework-skills/
-/docs/idea.md
 /coverage/
 /tests/
 /scripts/
@@ -23,3 +22,10 @@
 /.dockerignore
 /.gitattributes
 /devcheck.config.json
+/changelog/
+/.claude-plugin/
+/.codex-plugin/
+/plugin.json
+/mcp.json
+/CLAUDE.md
+/AGENTS.md
