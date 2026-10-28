@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-28
+
+A Canadian Parliament research guide connects bill, member, division, and Hansard evidence, and current House session routes restore division queries and member ballots.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-10-24
 
 Verified member identity variants and bounded search pages with explicit official-source refusals.

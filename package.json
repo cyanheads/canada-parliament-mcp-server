@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/canada-parliament-mcp-server",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "mcpName": "io.github.cyanheads/canada-parliament-mcp-server",
   "description": "Track Canadian federal bills, MPs, House votes, and Hansard speeches via MCP. STDIO or Streamable HTTP.",
   "type": "module",

@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/canada-parliament-mcp-server",
     "source": "github"
   },
-  "version": "0.1.3",
+  "version": "0.2.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/canada-parliament-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.3",
+      "version": "0.2.0",
       "environmentVariables": [
         {
           "name": "CANPARL_USER_AGENT",
@@ -44,7 +44,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/canada-parliament-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.3",
+      "version": "0.2.0",
       "environmentVariables": [
         {
           "name": "CANPARL_USER_AGENT",
