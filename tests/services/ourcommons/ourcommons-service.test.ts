@@ -9,10 +9,10 @@ import { realMemberVotes } from '../../fixtures/member-tools/harness.js';
 const base = 'https://www.ourcommons.ca/Members/en';
 const picker = `${base}/votes`;
 const roster = `${base}/search/xml`;
-const listing = `${base}/votes/xml?parlSession=45-1`;
+const listing = `${base}/votes/xml?s=45-1`;
 const detail = `${base}/votes/45/1/901/xml`;
 const html =
-  '<!-- synthetic --!><a data-input="parlSession" data-value="all">All</a><a data-input="parlSession" data-value="45-1">Synthetic session</a>';
+  '<!-- synthetic --!><a data-input="s" data-value="all">All</a><a data-input="s" data-value="45-1">Synthetic session</a>';
 const person =
   '<PersonId>9001</PersonId><PersonOfficialFirstName>River</PersonOfficialFirstName><PersonOfficialLastName>Example</PersonOfficialLastName>';
 const identity =
@@ -191,9 +191,9 @@ describe('OurCommonsService network boundary', () => {
   });
   describe('member votes', () => {
     const latest = `${base}/2897/votes/xml`;
-    const pinned = `${base}/2897/votes/xml?parlSession=45-1`;
+    const pinned = `${base}/2897/votes/xml?s=45-1`;
     const feed = realMemberVotes('2897-45-1');
-    it('reads the latest session without parlSession and serves the repeat from cache', async () => {
+    it('reads the latest session without a session query and serves the repeat from cache', async () => {
       http.route({ match: latest, respond: () => new Response(feed) });
       const first = await settle(service.listMemberVotes('2897', undefined, budget));
       expect(first.data).toHaveLength(25);

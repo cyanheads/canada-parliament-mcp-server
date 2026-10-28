@@ -20,18 +20,31 @@ const ballots = (extra = '<VoteValueName>Yea</VoteValueName>') =>
   `<ArrayOfVoteParticipant><VoteParticipant>${person}${identity}${extra}</VoteParticipant></ArrayOfVoteParticipant>`;
 
 describe('House source parsing', () => {
-  it('uses the case-sensitive live picker selector, handles --!> and excludes all', () => {
+  it('preserves the legacy picker selector, handles --!> and excludes all', () => {
     expect(
       parseVoteSessions(
         '<!-- comment --!><a data-input="parlSession" data-value="all">All</a><a data-input="parlsession" data-value="99-9">Wrong selector</a><a data-input="parlSession" data-value="45-1">  Example\n Session </a>',
       ),
     ).toEqual([{ session: '45-1', parliament: 45, sessionNumber: 1, label: 'Example Session' }]);
   });
+  it('reads current House session choices without admitting other filters', () => {
+    expect(
+      parseVoteSessions(
+        '<a data-input="s" data-value="all">All</a><a role="option" data-value="45-1" data-input="s">45th Parliament, 1st Session</a><a role="option" data-value="44-1" data-input="s">44th Parliament, 1st Session</a><a data-input="S" data-value="99-1">Other filter</a>',
+      ),
+    ).toEqual([
+      { session: '45-1', parliament: 45, sessionNumber: 1, label: '45th Parliament, 1st Session' },
+      { session: '44-1', parliament: 44, sessionNumber: 1, label: '44th Parliament, 1st Session' },
+    ]);
+  });
   it.each([
     '',
     '<a data-input="parlSession" data-value="45-0">Bad</a>',
     '<a data-input="parlSession" data-value="045-1">Bad</a>',
     '<a data-input="parlSession" data-value="45-1">One</a><a data-input="parlSession" data-value="45-1">Duplicate</a>',
+    '<a data-input="s" data-value="45-0">Bad</a>',
+    '<a data-input="s" data-value="045-1">Bad</a>',
+    '<a data-input="s" data-value="45-1">One</a><a data-input="parlSession" data-value="45-1">Duplicate</a>',
   ])('rejects invalid picker %s', (html) => {
     expect(() => parseVoteSessions(html)).toThrow();
   });

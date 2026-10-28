@@ -166,7 +166,7 @@ export class OurCommonsService {
   async listVotes(session: string, request: RequestContext): Promise<SourceResult<Division[]>> {
     const provenance = await this.verifySession(session, request);
     const result = await this.load(
-      `/Members/en/votes/xml?parlSession=${encodeURIComponent(session)}`,
+      `/Members/en/votes/xml?s=${encodeURIComponent(session)}`,
       (text) => parseVotes(text, session),
       request,
     );
@@ -224,7 +224,7 @@ export class OurCommonsService {
       throw validationError('Person ID must be a positive decimal integer.');
     const provenance =
       session === undefined ? [] : await this.verifySession(session, request, 'votesSession');
-    const query = session === undefined ? '' : `?parlSession=${encodeURIComponent(session)}`;
+    const query = session === undefined ? '' : `?s=${encodeURIComponent(session)}`;
     const result = await this.load(
       `/Members/en/${personId}/votes/xml${query}`,
       (text) => parseMemberVotes(text, personId, session),

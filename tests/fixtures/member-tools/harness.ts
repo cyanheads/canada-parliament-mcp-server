@@ -25,15 +25,15 @@ export const lawrenceCannon = (): Record<string, unknown> =>
  * Captured OurCommons `/Members/en/{personId}/votes/xml` bodies (2026-10-21). Rows are verbatim and
  * in feed order; each file keeps a subset: `2897-45-1` divisions 169–179, every C-15 division, and
  * the date-time inversions 159/158, 147/146, 131/130; `2897-44-1`, `35933-latest` (the request
- * without `parlSession`, 41-2), and `88721-45-1` (divisions 54–52, 53 Paired) keep three rows;
+ * without a session query, 41-2), and `88721-45-1` (divisions 54–52, 53 Paired) keep three rows;
  * `empty` is the whole body for a session the member did not sit in.
  */
 export const realMemberVotes = (
   name: '2897-45-1' | '2897-44-1' | '35933-latest' | '88721-45-1' | 'empty',
 ): string => readFileSync(new URL(`./member-votes/${name}.xml`, import.meta.url), 'utf8');
-/** Official member-votes feed URL, with `parlSession` only when a session is supplied. */
+/** Official member-votes feed URL, with `s` only when a session is supplied. */
 export const memberVotesUrl = (personId: string, session?: string) =>
-  `https://www.ourcommons.ca/Members/en/${personId}/votes/xml${session ? `?parlSession=${session}` : ''}`;
+  `https://www.ourcommons.ca/Members/en/${personId}/votes/xml${session ? `?s=${session}` : ''}`;
 export function setup() {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-20T00:00:00Z'));

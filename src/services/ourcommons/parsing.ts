@@ -162,30 +162,31 @@ function recordedBallot(row: RecordValue): RecordedBallot {
 export function parseVoteSessions(html: string): VoteSession[] {
   // The live page uses HTML's --!> comment terminator, unsupported by linkedom.
   const { document } = parseHTML(html.replace(/--!>/g, '-->'));
-  const sessions = [...document.querySelectorAll('[data-input="parlSession"][data-value]')].flatMap(
-    (element) => {
-      const session = element.getAttribute('data-value');
-      if (session === 'all') return [];
-      if (!session || !/^[1-9]\d*-[1-9]\d*$/.test(session))
-        return malformed('session picker token');
-      const [parliament, sessionNumber] = session.split('-').map(Number);
-      if (
-        !parliament ||
-        !sessionNumber ||
-        !Number.isSafeInteger(parliament) ||
-        !Number.isSafeInteger(sessionNumber)
-      )
-        return malformed('session picker token');
-      return [
-        {
-          session,
-          parliament,
-          sessionNumber,
-          label: element.textContent.trim().replace(/\s+/gu, ' '),
-        },
-      ];
-    },
-  );
+  const sessions = [
+    ...document.querySelectorAll(
+      '[data-input="s"][data-value], [data-input="parlSession"][data-value]',
+    ),
+  ].flatMap((element) => {
+    const session = element.getAttribute('data-value');
+    if (session === 'all') return [];
+    if (!session || !/^[1-9]\d*-[1-9]\d*$/.test(session)) return malformed('session picker token');
+    const [parliament, sessionNumber] = session.split('-').map(Number);
+    if (
+      !parliament ||
+      !sessionNumber ||
+      !Number.isSafeInteger(parliament) ||
+      !Number.isSafeInteger(sessionNumber)
+    )
+      return malformed('session picker token');
+    return [
+      {
+        session,
+        parliament,
+        sessionNumber,
+        label: element.textContent.trim().replace(/\s+/gu, ' '),
+      },
+    ];
+  });
   if (!sessions.length) return malformed('session picker');
   return unique(sessions, (row) => row.session);
 }

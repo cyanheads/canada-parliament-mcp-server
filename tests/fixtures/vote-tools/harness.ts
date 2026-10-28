@@ -13,7 +13,7 @@ import {
 
 export { current, listing, picker, rawBill, sessions, settle } from '../bill-tools/harness.js';
 export const votePicker = 'https://www.ourcommons.ca/Members/en/votes';
-export const votesUrl = (session = '45-1') => `${votePicker}/xml?parlSession=${session}`;
+export const votesUrl = (session = '45-1') => `${votePicker}/xml?s=${session}`;
 export const detailUrl = (session = '45-1', number = 901) =>
   `${votePicker}/${session.replace('-', '/')}/${number}/xml`;
 export const rosterUrl = 'https://www.ourcommons.ca/Members/en/search/xml';
