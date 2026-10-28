@@ -144,8 +144,26 @@ describe('actual parliament application over stdio', () => {
     child.stdin.write(
       `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`,
     );
-    expect(await request('resources/list')).toEqual({ resources: [] });
-    expect(await request('resources/templates/list')).toEqual({ resourceTemplates: [] });
+    expect(await request('resources/list')).toMatchObject({
+      resources: [
+        {
+          name: 'canada-parliament-guide',
+          uri: 'skill://canada-parliament-guide/SKILL.md',
+          mimeType: 'text/markdown',
+        },
+      ],
+    });
+    expect(await request('resources/templates/list')).toMatchObject({
+      resourceTemplates: [{ uriTemplate: 'skill://{+path}' }],
+    });
+    const guide = await request<{ contents: { text: string; uri: string }[] }>('resources/read', {
+      uri: 'skill://canada-parliament-guide/SKILL.md',
+    });
+    expect(guide.contents).toHaveLength(1);
+    expect(guide.contents[0]?.uri).toBe('skill://canada-parliament-guide/SKILL.md');
+    expect(guide.contents[0]?.text).toBe(
+      await readFile(`${root}skills/canada-parliament-guide/SKILL.md`, 'utf8'),
+    );
     expect(await request('prompts/list')).toEqual({ prompts: [] });
     const listing = await request<{ tools: ListedTool[] }>('tools/list');
     expect(listing.tools.map((tool) => tool.name).sort()).toEqual([

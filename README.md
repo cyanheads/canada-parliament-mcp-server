@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/canada-parliament-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/canada-parliament-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/canada-parliament-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/canada-parliament-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/canada-parliament-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/canada-parliament-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -134,135 +134,36 @@ Agent-friendly output:
 - Explicit coverage: normalized `appliedFilters`, continuation fields, notices, and typed failure reasons separate no matches from unavailable or incomplete data
 - Both surfaces: every `structuredContent` value, complete source text included, also renders in Markdown `content[]`
 
+The [Canadian Parliament research guide](./skills/canada-parliament-guide/SKILL.md) connects bill, division, member, and Hansard records and explains the evidence needed for historical conclusions. It ships with plugin installs, npm, Docker, and the desktop bundle, and is available over MCP as `skill://canada-parliament-guide/SKILL.md`.
+
 ## Getting started
 
-### Public Hosted Instance
-
-A public instance is available at `https://canada-parliament.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
-
-For Claude Code:
+Connect to the hosted server in Claude Code:
 
 ```sh
 claude mcp add --transport http canada-parliament-mcp-server https://canada-parliament.caseyjhand.com/mcp
 ```
 
-For Cline (`cline_mcp_settings.json`):
+Or run it locally:
 
-```json
-{
-  "mcpServers": {
-    "canada-parliament-mcp-server": {
-      "type": "streamableHttp",
-      "url": "https://canada-parliament.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add canada-parliament-mcp-server -- npx -y @cyanheads/canada-parliament-mcp-server
 ```
 
-For Cursor (`mcp.json`):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "canada-parliament-mcp-server": {
-      "url": "https://canada-parliament.caseyjhand.com/mcp"
-    }
-  }
-}
-```
-
-Claude Desktop adds remote servers under Settings → Connectors.
-
-### Self-Hosted / Local
-
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "canada-parliament-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/canada-parliament-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-Or with npx (no Bun required):
-
-```json
-{
-  "mcpServers": {
-    "canada-parliament-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/canada-parliament-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/canada-parliament-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "canada-parliament-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/canada-parliament-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- Internet access to parl.ca, ourcommons.ca, and openparliament.ca; no API key is required.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/canada-parliament-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd canada-parliament-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# optional: set CANPARL_USER_AGENT to identify your deployment to the upstream sources
-```
+No API key is required. Optionally set `CANPARL_USER_AGENT` to identify your deployment to the upstream sources. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -285,6 +186,15 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 
 ### Local development
 
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+), and Internet access to parl.ca, ourcommons.ca, and openparliament.ca.
+
+```sh
+git clone https://github.com/cyanheads/canada-parliament-mcp-server.git
+cd canada-parliament-mcp-server
+bun install
+cp .env.example .env
+```
+
 - **Build and run the production version**:
 
   ```sh
@@ -303,6 +213,14 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
   bun run test      # Runs the test suite
   ```
 
+### Docker
+
+```sh
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/canada-parliament-mcp-server:latest
+```
+
+The image defaults to HTTP transport, stateless sessions, and logs in `/var/log/canada-parliament-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/canada-parliament-mcp-server:latest"]`. Build locally with `docker build -t canada-parliament-mcp-server .`; OpenTelemetry peers are installed by default, or omitted with `--build-arg OTEL_ENABLED=false`.
+
 ## Project structure
 
 | Directory | Purpose |
@@ -313,6 +231,7 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 | `src/services/openparliament` | OpenParliament service — historical identities, activity, speeches, and memberships. |
 | `src/domain` | Shared schemas, normalization, reference vocabulary, and request budgets. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
+| `skills/` | Published parliamentary research guide for agents calling the tools. |
 | `tests/` | Parser, service, tool, and integration tests over synthetic upstream fixtures. |
 
 See [`docs/tree.md`](./docs/tree.md) for the full tree.

@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-24 18:58:44
+Generated on: 2026-10-28 12:33:26
 
 ```text
 canada-parliament-mcp-server/
@@ -36,6 +36,8 @@ canada-parliament-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -211,6 +213,8 @@ canada-parliament-mcp-server/
 │   │   └── parliament-server.test.ts
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── bundle-runtime-paths.test.ts
 │   ├── services/
 │   │   ├── legisinfo/
 │   │   │   ├── legisinfo-service.test.ts
@@ -249,7 +253,9 @@ canada-parliament-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

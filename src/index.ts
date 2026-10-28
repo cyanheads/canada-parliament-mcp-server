@@ -24,6 +24,7 @@ import { disposeOurCommonsService, initOurCommonsService } from './services/ourc
 await createApp({
   name: 'canada-parliament-mcp-server',
   title: 'canada-parliament-mcp-server',
+  skills: 'skills',
   tools: [
     searchBillsTool,
     getBillTool,
