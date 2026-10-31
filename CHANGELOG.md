@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-10-31 · 🛡️ Security
+
+Search a past Parliament's House roster and open former members' profiles, read and search French Hansard, get royal assent and reading times as UTC instants, match text filters across accents, dashes, and quotes, and see each fixed input format in the tool schemas; text and vocabulary filters run in time linear in the value's length.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-28
 
 A Canadian Parliament research guide connects bill, member, division, and Hansard evidence, and current House session routes restore division queries and member ballots.

@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 12:55:11
+Generated on: 2026-10-31 21:17:03
 
 ```text
 canada-parliament-mcp-server/
@@ -199,17 +199,29 @@ canada-parliament-mcp-server/
 │   │   │   └── upstream-preload.ts
 │   │   ├── member-tools/
 │   │   │   ├── member-votes/
+│   │   │   │   ├── 1463-38-1.xml
 │   │   │   │   ├── 2897-44-1.xml
 │   │   │   │   ├── 2897-45-1.xml
 │   │   │   │   ├── 35933-latest.xml
 │   │   │   │   ├── 88721-45-1.xml
 │   │   │   │   └── empty.xml
+│   │   │   ├── rosters/
+│   │   │   │   ├── all.xml
+│   │   │   │   ├── current.xml
+│   │   │   │   ├── empty.xml
+│   │   │   │   ├── p36.xml
+│   │   │   │   ├── p38.xml
+│   │   │   │   ├── p41.xml
+│   │   │   │   ├── p45.xml
+│   │   │   │   └── picker.html
 │   │   │   ├── harness.ts
 │   │   │   └── lawrence-cannon.json
 │   │   ├── speech-tools/
+│   │   │   ├── hansard-rows.json
 │   │   │   └── harness.ts
 │   │   ├── vote-tools/
 │   │   │   └── harness.ts
+│   │   ├── cpu-timing.ts
 │   │   ├── filter-rejection.ts
 │   │   └── markdown-decode.ts
 │   ├── fuzz/
