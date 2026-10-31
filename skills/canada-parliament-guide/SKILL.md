@@ -4,7 +4,7 @@ description: Use canparl_* tools to trace a Canadian federal bill through House 
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -15,7 +15,7 @@ Use this guide when a parliamentary question needs evidence from more than one r
 
 Keep a bill's returned session and billCode together throughout the investigation, including any suffix letter. Carry that session with each division number obtained from canparl_get_bill or canparl_search_votes; a number alone does not identify the historical division.
 
-For a member profile, pass the returned canparl_search_members detailLookup to canparl_get_member. For a historical division participant, the ballot row's personId can filter canparl_get_vote directly; do not assume that identifier also permits a current-member profile lookup.
+For a member profile, pass the returned canparl_search_members detailLookup to canparl_get_member. For a historical division participant, the ballot row's personId can filter canparl_get_vote directly and, for members of the 36th Parliament onward, also opens their profile in canparl_get_member. A personId is never an OpenParliament slug: canparl_search_bills sponsor and canparl_search_speeches politician read a personId only for a current MP.
 
 ## Gates
 
@@ -41,6 +41,8 @@ Resolve the member and bill first. In canparl_search_speeches, distinguish speec
 
 Inspect headings and the complete returned speech before attributing a position. For questions about procedural conduct, include procedural remarks rather than relying on the substantive-only default. A completed indexed search establishes only what matched that scope, not that no parliamentary speech occurred.
 
+Speeches come back in English by default. Set language to fr to read and search French Hansard (speaker, headings, content, and the contains scan); party and riding stay English. Older records carry no French: none in sampled 1994–2005 speeches, and no French headings or attribution in samples through late 2011 (they appear by mid-2012). A French scan that finds nothing therefore says nothing about those records. Read the notice reporting scanned candidates with no French text, or repeat the search in English.
+
 ### Investigate a former MP
 
-Use canparl_search_members historical mode for name discovery, then inspect the returned member profile and dated memberships. Historical name results are sparse: unknown caucus or riding values do not exclude a candidate. Continue into the profile's available activity or a specific historical division; do not reconstruct past affiliation from today's roster.
+When the Parliament is known (36th onward), use canparl_search_members with parliament: it searches that Parliament's official roster for everyone who sat in it, with official personIds, ridings, caucus, and membership dates. A roster row carries one caucus per member, the last held in that Parliament, so it does not show a mid-term switch or the caucuses at a given division; read those from canparl_get_vote byParty. Otherwise use historical mode (includeFormer) for name discovery. Then inspect the returned member profile and dated memberships. A former member's personId opens a canparl_get_member profile carrying their latest Parliament's caucus and riding. Historical name results are sparse: unknown caucus or riding values do not exclude a candidate. Continue into the profile's available activity or a specific historical division; do not reconstruct past affiliation from today's roster.

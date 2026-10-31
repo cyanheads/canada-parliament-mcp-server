@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "canada-parliament-mcp-server",
     "shortDescription": "Track Canadian federal bills, MPs, House votes, and Hansard speeches via MCP. STDIO or Streamable HTTP.",
-    "longDescription": "Follow Canadian federal legislation from official LEGISinfo bill searches through stages, recorded House divisions, publications, and enacted statute citations. Search current House MPs and OpenParliament's historical name index, inspect dated memberships and bounded member activity, and retrieve indexed House Hansard speeches by speaker, bill, date, or literal English text. Responses retain source provenance, unavailable fields, and explicit continuations. Public upstreams require no API key; parliamentary data remains subject to its source reuse terms.",
+    "longDescription": "Follow Canadian federal legislation from official LEGISinfo bill searches through stages, recorded House divisions, publications, and enacted statute citations. Search current House MPs, past Parliaments' official rosters, and OpenParliament's historical name index, inspect dated memberships and bounded member activity, and retrieve indexed House Hansard speeches by speaker, bill, date, or literal English or French text. Responses retain source provenance, unavailable fields, and explicit continuations. Public upstreams require no API key; parliamentary data remains subject to its source reuse terms.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": ["Read"],
