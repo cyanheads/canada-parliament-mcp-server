@@ -7,7 +7,11 @@ import { PARTIES } from '@/domain/reference-catalog.js';
 import type { JsonRecord } from '@/domain/schemas.js';
 import { RESPONSE_BUDGET, responseBytes } from '@/mcp-server/tools/definitions/_format.js';
 import { getVoteTool } from '@/mcp-server/tools/definitions/get-vote.tool.js';
-import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
+import {
+  assertArgumentRejection,
+  assertFilterRejection,
+  type FilterRejection,
+} from '../fixtures/filter-rejection.js';
 import {
   ballotParity,
   ballots,
@@ -429,14 +433,9 @@ describe('canparl_get_vote production contract', () => {
     if (expected) assertFilterRejection(result, expected);
   });
   const ballotValues = ['Yea', 'Nay', 'Paired', 'Yes', 'No'];
-  const decimal = 'Expected a decimal official person ID';
   it.each<[Record<string, unknown>, FilterRejection]>([
     [{ ballot: 'Absent' }, { field: 'ballot', rejected: 'Absent', allowed: ballotValues }],
     [{ ballot: 'Didn’t vote' }, { field: 'ballot', rejected: 'Didn’t', allowed: ballotValues }],
-    [{ personId: 'M2897' }, { field: 'personId', rejected: 'M2897', shape: decimal }],
-    [{ personId: '-41' }, { field: 'personId', rejected: '-41', shape: decimal }],
-    [{ personId: '28.97' }, { field: 'personId', rejected: '28.97', shape: decimal }],
-    [{ personId: 'river-example' }, { field: 'personId', rejected: 'river', shape: decimal }],
   ])('rejects invalid ballot filter %j before HTTP', async (input, expected) => {
     feed();
     const result = await call(input);
@@ -444,6 +443,19 @@ describe('canparl_get_vote production contract', () => {
     assertFilterRejection(result, expected);
     expect(http.calls).toHaveLength(0);
   });
+  it.each(['M2897', '-41', '28.97', 'river-example'])(
+    'rejects personId %j by its advertised format before HTTP',
+    async (personId) => {
+      feed();
+      assertArgumentRejection(await call({ personId }), {
+        lines: [
+          'personId: Expected a decimal official person ID, as in a canparl_search_members detailLookup or a canparl_get_vote ballot row.',
+        ],
+        rejected: personId,
+      });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
   it.each(['45-0', '9007199254740992-1'])(
     'rejects malformed session %j as unsupported_vote_session before HTTP',
     async (session) => {

@@ -68,17 +68,20 @@ export interface Vote {
   subject: string | null;
   url: string;
 }
-/** Candidate speech with complete English prose and historical membership reference. */
+/**
+ * Candidate speech with its attribution, headings, and complete plain text in both languages, and a
+ * historical membership reference. A language without text is null there, never the other's text.
+ */
 export interface Speech {
-  content: string | null;
+  content: BilingualText;
   debateUrl: string | null;
-  h1: string | null;
-  h2: string | null;
+  h1: BilingualText;
+  h2: BilingualText;
   id: string;
   membershipUrl: string | null;
   politician: string | null;
   procedural: boolean | null;
-  speaker: string | null;
+  speaker: BilingualText;
   time: string;
   url: string;
 }

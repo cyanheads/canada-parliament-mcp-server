@@ -8,8 +8,8 @@ import {
   normalizeProvince,
   normalizeSession,
   normalizeVocabulary,
+  PERSON_ID_FORMAT,
   paginate,
-  rejectFilter,
 } from '@/domain/normalization.js';
 import {
   BALLOTS,
@@ -23,6 +23,7 @@ import {
   COUNT_CEILING,
   OffsetSchema,
   OptionalStringSchema,
+  optionalFormat,
   PaginationSchema,
   SessionInputSchema,
   SourceSchema,
@@ -30,7 +31,6 @@ import {
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
 import { getOurCommonsService } from '@/services/ourcommons/index.js';
 import { formatResult, measuredTrailer, RESPONSE_BUDGET, responseBytes } from './_format.js';
-import { PERSON_ID } from './_member-identity.js';
 import { DivisionSchema } from './search-votes.tool.js';
 
 const PartyTallySchema = z
@@ -93,7 +93,7 @@ export const getVoteTool = tool('canparl_get_vote', {
     ballot: OptionalStringSchema.describe(
       'Recorded ballot Yea, Nay, or Paired, case-insensitive; Yes and No are accepted as Yea and Nay.',
     ),
-    personId: OptionalStringSchema.describe(
+    personId: optionalFormat(PERSON_ID_FORMAT).describe(
       "Decimal official person ID from canparl_search_members detailLookup or a ballot row; matches this division's recorded participants, including members no longer seated.",
     ),
     limit: z
@@ -158,7 +158,7 @@ export const getVoteTool = tool('canparl_get_vote', {
     {
       reason: 'unsupported_vote_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Malformed or unsupported official division session.',
+      when: 'Session with a zero or out-of-range number, or absent from the official division picker.',
       recovery:
         'Call canparl_list_reference with topic sessions and choose a session supporting House divisions.',
       retryable: false,
@@ -174,9 +174,9 @@ export const getVoteTool = tool('canparl_get_vote', {
     {
       reason: 'invalid_ballot_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Unrecognized caucus, province, or ballot value, or a personId that is not decimal.',
+      when: 'Unrecognized caucus, province, or ballot value.',
       recovery:
-        'Retry canparl_get_vote with a caucus from canparl_list_reference topic parties, a province code or full name, ballot Yea, Nay, or Paired, and a decimal personId from canparl_search_members.',
+        'Retry canparl_get_vote with a caucus from canparl_list_reference topic parties, a province code or full name, and ballot Yea, Nay, or Paired.',
       retryable: false,
     },
     {
@@ -213,11 +213,6 @@ export const getVoteTool = tool('canparl_get_vote', {
           normalizeFilter('ballot', input.ballot, (value) =>
             normalizeVocabulary(value, BALLOTS, OFFICIAL_BALLOT_ALIASES),
           ) ?? null;
-        if (input.personId !== undefined && !PERSON_ID.test(input.personId))
-          throw rejectFilter(
-            'personId',
-            'Expected a decimal official person ID, as in a canparl_search_members detailLookup or a canparl_get_vote ballot row.',
-          );
       } catch (error) {
         throw ctx.fail('invalid_ballot_filter', ...filterFailure(error));
       }

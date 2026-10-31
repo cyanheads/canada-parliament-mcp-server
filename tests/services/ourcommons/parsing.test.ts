@@ -3,11 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
   parseMembers,
   parseMemberVotes,
+  parseRoster,
+  parseRosterParliaments,
   parseVoteParticipants,
   parseVoteSessions,
   parseVotes,
 } from '@/services/ourcommons/parsing.js';
-import { realMemberVotes } from '../../fixtures/member-tools/harness.js';
+import { realMemberVotes, realRoster } from '../../fixtures/member-tools/harness.js';
 
 const person =
   '<PersonId>9001</PersonId><PersonOfficialFirstName>River</PersonOfficialFirstName><PersonOfficialLastName>Example</PersonOfficialLastName>';
@@ -57,6 +59,8 @@ describe('House source parsing', () => {
       party: null,
       riding: null,
       province: null,
+      from: null,
+      to: null,
       url: 'https://www.ourcommons.ca/Members/en/9001',
       current: true,
       slug: null,
@@ -68,6 +72,13 @@ describe('House source parsing', () => {
       )[0]?.party,
     ).toBeNull();
   });
+  it.each([
+    '<CaucusShortName />',
+    '<CaucusShortName></CaucusShortName>',
+    '<CaucusShortName> </CaucusShortName>',
+  ])('reads a blank caucus %s on the current roster as no caucus', (caucus) =>
+    expect(parseMembers(members(`${person}${caucus}`))[0]?.party).toBeNull(),
+  );
   it('decodes predefined and numeric references exactly once', () => {
     const xml = members(
       person.replace(
@@ -108,6 +119,120 @@ describe('House source parsing', () => {
         `<ArrayOfMemberOfParliament><MemberOfParliament>${person}</MemberOfParliament><MemberOfParliament>${person}</MemberOfParliament></ArrayOfMemberOfParliament>`,
       ),
     ).toThrow());
+  it('maps real Parliament roster rows with their membership span as published', () => {
+    const rows = parseRoster(realRoster('p38'));
+    expect(rows.map((row) => row.personId)).toEqual([
+      '1463',
+      '25469',
+      '13',
+      '192',
+      '18',
+      '29612',
+      '25458',
+    ]);
+    expect(rows.find((row) => row.personId === '18')).toEqual({
+      personId: '18',
+      firstName: 'Lawrence',
+      lastName: "O'Brien",
+      name: "Lawrence O'Brien",
+      party: 'Liberal',
+      riding: 'Labrador',
+      province: 'Newfoundland and Labrador',
+      from: '2004-06-28T00:00:00',
+      to: '2004-12-16T23:59:59',
+      url: 'https://www.ourcommons.ca/Members/en/18',
+    });
+    expect(rows.find((row) => row.personId === '29612')).toMatchObject({
+      riding: 'Labrador',
+      from: '2005-05-24T00:00:00',
+      to: '2006-01-22T23:59:00',
+    });
+    expect(parseRoster(realRoster('p36')).find((row) => row.personId === '1463')?.party).toBe(
+      'Canadian Alliance',
+    );
+  });
+  it.each<[string, string]>([
+    ['p41', '71465'],
+    ['p36', '880'],
+  ])('reads the real blank caucus in %s row %s as no caucus', (name, personId) => {
+    const row = parseRoster(realRoster(name as 'p41' | 'p36')).find(
+      (entry) => entry.personId === personId,
+    );
+    expect(row).toMatchObject({ party: null, from: expect.any(String), to: expect.any(String) });
+  });
+  it('reads a sitting member nil ToDateTime and omitted optional fields as null', () => {
+    const current = parseMembers(realRoster('current'));
+    expect(current.map(({ personId, from, to }) => ({ personId, from, to }))).toEqual([
+      { personId: '89156', from: '2025-04-28T00:00:00', to: null },
+      { personId: '72029', from: '2025-04-28T00:00:00', to: null },
+    ]);
+    const sparse = realRoster('p45')
+      .replace('<ConstituencyName>Scarborough Southwest</ConstituencyName>', '')
+      .replace('<CaucusShortName>Liberal</CaucusShortName>', '')
+      .replace(
+        '<FromDateTime>2025-04-28T00:00:00</FromDateTime><ToDateTime>2026',
+        '<ToDateTime>2026',
+      );
+    expect(parseRoster(sparse).find((row) => row.personId === '88961')).toEqual({
+      personId: '88961',
+      firstName: 'Bill',
+      lastName: 'Blair',
+      name: 'Bill Blair',
+      party: null,
+      riding: null,
+      province: 'Ontario',
+      from: null,
+      to: '2026-02-02T16:00:00',
+      url: 'https://www.ourcommons.ca/Members/en/88961',
+    });
+  });
+  it('reads the real empty roster of an unlisted Parliament as no rows', () =>
+    expect(parseRoster(realRoster('empty'))).toEqual([]));
+  it('rejects a duplicate person in a Parliament roster as malformed', () => {
+    const xml = realRoster('p38');
+    const first = xml.slice(
+      xml.indexOf('<MemberOfParliament>'),
+      xml.indexOf('</MemberOfParliament>') + 21,
+    );
+    expect(() =>
+      parseRoster(
+        xml.replace('</ArrayOfMemberOfParliament>', `${first}</ArrayOfMemberOfParliament>`),
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reason: 'upstream_response_invalid',
+          field: 'duplicate identity',
+        }),
+      }),
+    );
+  });
+  it('reads the real roster Parliament picker, ignoring All, Current Members, and other dropdowns', () => {
+    expect(parseRosterParliaments(realRoster('picker'))).toEqual([
+      45, 44, 43, 42, 41, 40, 39, 38, 37, 36,
+    ]);
+    expect(
+      parseRosterParliaments(
+        '<!-- comment --!><a data-input="p" data-value="*">All</a><a data-input="P" data-value="99">Other</a><a data-input="p" data-value="7">7th</a>',
+      ),
+    ).toEqual([7]);
+  });
+  it.each([
+    '',
+    realRoster('picker').replaceAll('data-input="p"', 'data-input="q"'),
+    '<a data-input="p" data-value="*">All</a><a data-input="p" data-value="cr">Current</a>',
+    ...['045', '0', '-1', '4.5', '1e2', ' 45', 'abc', '', '9007199254740992'].map(
+      (value) =>
+        `<a data-input="p" data-value="45">45</a><a data-input="p" data-value="${value}">x</a>`,
+    ),
+    '<a data-input="p" data-value="45">45</a><a data-input="p" data-value="45">again</a>',
+  ])('rejects an invalid roster picker %#', (html) =>
+    expect(() => parseRosterParliaments(html)).toThrow(
+      expect.objectContaining({
+        data: expect.objectContaining({ reason: 'upstream_response_invalid', retryable: false }),
+      }),
+    ),
+  );
   it('retains sparse tallies as null and a real zero as zero', () => {
     expect(
       parseVotes(

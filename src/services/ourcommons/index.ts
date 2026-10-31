@@ -10,6 +10,7 @@ export type {
   MemberVote,
   OurCommonsMember,
   RecordedBallot,
+  RosterMember,
   VoteParticipant,
   VoteSession,
 } from './types.js';

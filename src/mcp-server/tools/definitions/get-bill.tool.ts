@@ -5,17 +5,18 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  BILL_CODE_FORMAT,
   clampCount,
-  filterFailure,
+  type InputFormat,
   normalizeBillCode,
-  normalizeFilter,
 } from '@/domain/normalization.js';
 import { createRequestContext } from '@/domain/request-context.js';
 import {
   BilingualTextSchema,
   COUNT_CEILING,
   JsonRecordSchema,
-  OptionalStringSchema,
+  optionalFormat,
+  requiredFormat,
   SessionInputSchema,
   SourceSchema,
 } from '@/domain/schemas.js';
@@ -42,6 +43,11 @@ const sectionNames = [
   'milestones',
   'webReferences',
 ] as const;
+/** Exactly one listed selector. */
+const SECTION_FORMAT: InputFormat = {
+  source: `(?:${sectionNames.map((name) => name.replaceAll('.', '\\.')).join('|')})`,
+  expectation: `Unknown section. Available sections: ${sectionNames.join(', ')}.`,
+};
 /** Sections returned whole; only the remaining collections accept offset and limit. */
 const scalarSections = new Set<string>([
   'sponsor',
@@ -83,7 +89,7 @@ export const BillSummarySchema = z
       .nullable()
       .describe('Latest completed major stage, or null.'),
     royalAssentDate: text().describe(
-      'Royal assent as a UTC instant ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z), or null; a value in another shape is relayed as published.',
+      "Royal assent as a UTC instant ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z), converted from LEGISinfo's Ottawa-time clock, or null; the time of day is LEGISinfo's recorded time, which can differ from when assent was signified. A value in another shape is relayed as published.",
     ),
     url: z.string().describe('Absolute HTTPS official bill URL.'),
   })
@@ -102,7 +108,9 @@ const StageSchema = z
       })
       .strict()
       .describe('Stage state.'),
-    stateAsOf: text().describe('State-as-of date.'),
+    stateAsOf: text().describe(
+      'State-as-of date-time in Ottawa time as published, without an offset.',
+    ),
     committee: z
       .object({
         id: integer().describe('Committee organization ID.'),
@@ -117,7 +125,7 @@ const StageSchema = z
         z
           .object({
             number: text().describe('Sitting number.'),
-            date: text().describe('Sitting date.'),
+            date: text().describe('Sitting date in Ottawa time as published, without an offset.'),
             name: BilingualTextSchema.describe('Sitting names.'),
             published: z.boolean().nullable().describe('Publication flag.'),
           })
@@ -131,7 +139,9 @@ const StageSchema = z
         z
           .object({
             number: text().describe('Committee meeting number.'),
-            date: text().describe('Committee meeting date.'),
+            date: text().describe(
+              'Committee meeting date in Ottawa time as published, without an offset.',
+            ),
             committeeId: integer().describe('Committee organization ID.'),
             acronym: text().describe('Committee acronym.'),
             name: BilingualTextSchema.describe('Committee meeting names.'),
@@ -141,12 +151,21 @@ const StageSchema = z
       )
       .nullable()
       .describe('Committee meetings.'),
-    decisions: z.array(JsonRecordSchema).nullable().describe('Complete variable decision records.'),
+    decisions: z
+      .array(JsonRecordSchema)
+      .nullable()
+      .describe(
+        'Complete variable decision records; their date-times are Ottawa time as published, without an offset.',
+      ),
     significantEvents: z
       .array(JsonRecordSchema)
       .nullable()
-      .describe('Complete variable significant-event records.'),
-    endOfStageEvent: JsonRecordSchema.nullable().describe('Complete end-of-stage event.'),
+      .describe(
+        'Complete variable significant-event records; their date-times are Ottawa time as published, without an offset.',
+      ),
+    endOfStageEvent: JsonRecordSchema.nullable().describe(
+      'Complete end-of-stage event; its date-times are Ottawa time as published, without an offset.',
+    ),
   })
   .strict()
   .describe(
@@ -161,13 +180,11 @@ export const getBillTool = tool('canparl_get_bill', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     session: SessionInputSchema,
-    billCode: z
-      .string()
-      .describe(
-        'Bill code from canparl_search_bills, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
-      ),
-    section: OptionalStringSchema.describe(
-      'One section from the returned outline; omit for full dossier or overflow outline.',
+    billCode: requiredFormat(BILL_CODE_FORMAT).describe(
+      'Bill code from canparl_search_bills, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
+    ),
+    section: optionalFormat(SECTION_FORMAT).describe(
+      `One section from the returned outline: ${sectionNames.join(', ')}. Omit for the full dossier or its overflow outline.`,
     ),
     offset: z
       .number()
@@ -280,7 +297,7 @@ export const getBillTool = tool('canparl_get_bill', {
                 number: z.number().int().describe('House division number for canparl_get_vote.'),
                 subject: BilingualTextSchema.describe('Official division subjects.'),
                 dateTime: text().describe(
-                  'LEGISinfo sitting date-time as published, not the time the division was recorded (canparl_get_vote reports that); or null.',
+                  'LEGISinfo sitting date-time in Ottawa time as published, without an offset; not the time the division was recorded (canparl_get_vote reports that); or null.',
                 ),
                 result: text().describe('Official decision wording, or null.'),
                 yeas: integer().describe('Yea count, or null.'),
@@ -338,7 +355,7 @@ export const getBillTool = tool('canparl_get_bill', {
           })
           .strict()
           .describe(
-            'Reading milestones as UTC instants ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z); a value in another shape is relayed as published. Royal assent is bill.royalAssentDate.',
+            "Reading milestones as UTC instants ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z), converted from LEGISinfo's Ottawa-time clocks; Senate times of day are LEGISinfo's recorded times. A value in another shape is relayed as published. Royal assent is bill.royalAssentDate.",
           ),
         webReferences: z
           .array(
@@ -388,7 +405,7 @@ export const getBillTool = tool('canparl_get_bill', {
     {
       reason: 'invalid_bill_section',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Unknown section selector or pagination supplied without a collection section.',
+      when: 'Pagination supplied without a collection section.',
       recovery:
         'Choose an available section from the outline and use offset and limit only for collections.',
       retryable: false,
@@ -396,17 +413,10 @@ export const getBillTool = tool('canparl_get_bill', {
     {
       reason: 'unknown_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Malformed or unsupported official bill session.',
+      when: 'Session with a zero or out-of-range number, or absent from the official bill session index.',
       recovery: 'Call canparl_list_reference with topic sessions and choose a listed bill session.',
       retryable: false,
       thrownBy: 'service',
-    },
-    {
-      reason: 'invalid_bill_code',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'Ambiguous or malformed bill code.',
-      recovery: 'Call canparl_search_bills by title and copy the returned billCode and session.',
-      retryable: false,
     },
     {
       reason: 'bill_not_found',
@@ -429,12 +439,7 @@ export const getBillTool = tool('canparl_get_bill', {
     const request = createRequestContext(ctx);
     try {
       const limit = clampCount('limit', input.limit, 100);
-      let billCode: string;
-      try {
-        billCode = normalizeFilter('billCode', input.billCode, normalizeBillCode);
-      } catch (error) {
-        throw ctx.fail('invalid_bill_code', ...filterFailure(error));
-      }
+      const billCode = normalizeBillCode(input.billCode);
       const service = getLegisinfoService();
       const resolved = await service.resolveSession(input.session, request);
       const session = resolved.data;
@@ -480,12 +485,10 @@ export const getBillTool = tool('canparl_get_bill', {
           disclosure: `Dossier exceeds the ${RESPONSE_BUDGET}-byte serialized response budget. Re-call with one section selector; collections use offset and limit. No records have been discarded.`,
         };
       }
-      const selected = sections.find(({ name }) => name === input.section);
-      if (!selected)
-        throw ctx.fail(
-          'invalid_bill_section',
-          `Unknown section. Available sections: ${sectionNames.join(', ')}.`,
-        );
+      // The section pattern admits only listed selectors.
+      const selected = sections.find(
+        ({ name }) => name === input.section,
+      ) as (typeof sections)[number];
       if (scalarSections.has(selected.name) && (input.offset !== 0 || input.limit !== 20))
         throw ctx.fail('invalid_bill_section');
       const values = Array.isArray(selected.value) ? selected.value : null;

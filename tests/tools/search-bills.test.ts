@@ -23,7 +23,11 @@ import {
   teardown,
   trailerFields,
 } from '../fixtures/bill-tools/harness.js';
-import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
+import {
+  assertArgumentRejection,
+  assertFilterRejection,
+  type FilterRejection,
+} from '../fixtures/filter-rejection.js';
 import { collection, rawPerson, rosterUrl } from '../fixtures/vote-tools/harness.js';
 
 const rows = [
@@ -217,12 +221,18 @@ describe('canparl_search_bills production contract', () => {
       { name: 'First reading', chamber: 'House' },
     ]);
   });
-  it('reports a list royal assent offset value as its UTC instant', async () => {
-    feed([rawBill('C-15', { ReceivedRoyalAssentDateTime: '2026-03-26T06:50:00-04:00' })]);
+  it('reports list royal assent values as the UTC instants of their Ottawa clocks', async () => {
+    feed([
+      rawBill('C-15', { ReceivedRoyalAssentDateTime: '2026-03-26T06:50:00-04:00' }),
+      rawBill('C-2', { ReceivedRoyalAssentDateTime: '1997-12-17T19:00:00-05:00' }),
+    ]);
     const reply = await call({ session: '45-1' });
     check(reply);
     expect(reply.structuredContent).toMatchObject({
-      bills: [{ billCode: 'C-15', royalAssentDate: '2026-03-26T10:50:00Z' }],
+      bills: [
+        { billCode: 'C-2', royalAssentDate: '1997-12-18T05:00:00Z' },
+        { billCode: 'C-15', royalAssentDate: '2026-03-26T14:50:00Z' },
+      ],
     });
   });
   it('applies every filter together, aliases values, and computes totals before slicing', async () => {
@@ -299,6 +309,21 @@ describe('canparl_search_bills production contract', () => {
       expect(result.structuredContent).toMatchObject({ total: 1 });
     },
   );
+  it('matches a title typed without its accents or with other apostrophes, returning it as published', async () => {
+    const title = "Loi sur l'unit\u00e9 de l'\u00e9conomie canadienne";
+    feed([
+      rawBill('C-5', { ShortTitleFr: title }),
+      rawBill('C-6', { ShortTitleFr: "Loi sur l'unit\u00e9 de la recherche" }),
+    ]);
+    const typed = 'loi sur l\u2019unite  de l\u2019economie';
+    const result = await call({ session: '45-1', titleContains: typed });
+    check(result);
+    expect(result.structuredContent).toMatchObject({
+      total: 1,
+      bills: [{ billCode: 'C-5', shortTitle: { fr: title } }],
+      appliedFilters: { titleContains: typed },
+    });
+  });
   it('treats optional blanks as unset and uses session-observed vocabulary', async () => {
     feed();
     const blanks = await call({
@@ -404,6 +429,24 @@ describe('canparl_search_bills production contract', () => {
     });
     expect(http.calls.map((c) => c.request.url)).not.toContain(current);
   });
+  it('returns 10 rows by default inside the byte budget that ends an explicit 25-row page', async () => {
+    feed(Array.from({ length: 30 }, (_, i) => rawBill(`C-${i + 1}`)));
+    const byDefault = check(await call({ session: '45-1' }));
+    expect(byDefault).toMatchObject({
+      totalCount: 30,
+      shown: 10,
+      cap: 10,
+      truncated: true,
+      pagination: { offset: 0, limit: 10, nextOffset: 10, hasMore: true },
+    });
+    expect(byDefault.notice).toBeUndefined();
+    expect(check(await call({ session: '45-1', limit: 25 }))).toMatchObject({
+      shown: 21,
+      cap: 25,
+      pagination: { limit: 25, nextOffset: 21 },
+      notice: expect.stringContaining('24000-byte response budget'),
+    });
+  });
   it('preserves the 100-row cap while applying the disclosed byte budget', async () => {
     feed(Array.from({ length: 100 }, (_, i) => rawBill(`C-${100 - i}`)));
     const result = await call({ session: '45-1', limit: 100 });
@@ -452,7 +495,6 @@ describe('canparl_search_bills production contract', () => {
     },
   );
   it.each([
-    { billCode: 'C-0' },
     { originatingChamber: 'Assembly' },
     { billType: 'not a known type' },
     { status: 'imaginary stage' },
@@ -465,15 +507,20 @@ describe('canparl_search_bills production contract', () => {
       hint,
     );
   });
+  it.each(['C-0', 'Q-77777'])(
+    'rejects billCode %j by its advertised format before any request',
+    async (billCode) => {
+      feed();
+      assertArgumentRejection(await call({ session: '45-1', billCode }), {
+        lines: [
+          'billCode: Expected a House or Senate bill code such as C-15, C-15A, or S-1001: C or S, an optional single dash or space, a number without leading zeros, then an optional suffix letter.',
+        ],
+        rejected: billCode,
+      });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
   it.each<[Record<string, string>, FilterRejection]>([
-    [
-      { billCode: 'Q-77777' },
-      {
-        field: 'billCode',
-        rejected: 'Q-77777',
-        shape: 'Expected a House or Senate bill code such as C-15',
-      },
-    ],
     [
       { originatingChamber: 'Zz Assembly' },
       {

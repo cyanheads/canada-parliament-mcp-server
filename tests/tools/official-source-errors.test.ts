@@ -21,6 +21,7 @@ import {
   teardown,
   trailerFields,
 } from '../fixtures/bill-tools/harness.js';
+import { parliamentRosterUrl, realRoster, rosterPicker } from '../fixtures/member-tools/harness.js';
 
 describe('official source refusal envelopes', () => {
   let http: ReturnType<typeof setup>;
@@ -118,6 +119,54 @@ describe('official source refusal envelopes', () => {
       expect(httpFailure).toBeDefined();
       expect(JSON.stringify(httpFailure)).not.toContain('refusal-private-marker');
       expect(JSON.stringify(httpFailure)).not.toContain('<html>');
+    },
+  );
+  it.each([
+    {
+      name: 'the roster picker',
+      definition: searchMembersTool,
+      call: () => runToolContract(searchMembersTool, { parliament: 41 }),
+      served: [],
+      refused: rosterPicker,
+    },
+    {
+      name: 'a Parliament roster',
+      definition: searchMembersTool,
+      call: () => runToolContract(searchMembersTool, { parliament: 41 }),
+      served: [[rosterPicker, 'picker']] as const,
+      refused: parliamentRosterUrl(41),
+    },
+    {
+      name: 'the all-Parliaments roster',
+      definition: getMemberTool,
+      call: () => runToolContract(getMemberTool, { personId: '1463' }),
+      served: [['https://www.ourcommons.ca/Members/en/search/xml', 'current']] as const,
+      refused: parliamentRosterUrl('*'),
+    },
+  ])(
+    'fails a 403 from $name as upstream_blocked without retry',
+    async ({ definition, call, served, refused }) => {
+      for (const [url, body] of served)
+        http.route({ match: url, respond: () => new Response(realRoster(body)) });
+      http.route({
+        match: refused,
+        respond: new Response('<html>refusal-private-marker</html>', { status: 403 }),
+      });
+      const result = await settle(call());
+      expect(definition.errors).toContainEqual(
+        expect.objectContaining({ reason: 'upstream_blocked', thrownBy: 'service' }),
+      );
+      assertError(
+        result,
+        'upstream_blocked',
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Retry OurCommons later for official parliamentary data.',
+      );
+      expect(JSON.stringify(result)).not.toContain('refusal-private-marker');
+      expect(http.calls.map((entry) => entry.request.url)).toEqual([
+        ...served.map(([url]) => url),
+        refused,
+      ]);
     },
   );
   it('preserves optional currentness unavailability when a slug profile succeeds', async () => {

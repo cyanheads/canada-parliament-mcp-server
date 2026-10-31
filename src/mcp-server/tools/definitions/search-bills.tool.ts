@@ -5,6 +5,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
+  BILL_CODE_FORMAT,
   clampCount,
   filterFailure,
   includesText,
@@ -22,6 +23,7 @@ import {
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
+  optionalFormat,
   PaginationSchema,
   SessionInputSchema,
   SourceSchema,
@@ -74,9 +76,9 @@ export const searchBillsTool = tool('canparl_search_bills', {
   input: z.object({
     session: SessionInputSchema,
     titleContains: OptionalStringSchema.describe(
-      'Literal case-insensitive substring of any English or French long or short title.',
+      'Literal substring of any English or French long or short title; matching ignores case, accents, dash and quote styles, and repeated whitespace.',
     ),
-    billCode: OptionalStringSchema.describe(
+    billCode: optionalFormat(BILL_CODE_FORMAT).describe(
       'Exact bill code, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
     ),
     originatingChamber: OptionalStringSchema.describe(
@@ -91,9 +93,11 @@ export const searchBillsTool = tool('canparl_search_bills', {
     sponsor: OptionalStringSchema.describe(
       "MP OpenParliament slug or politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId; Senators are not indexed. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
     ),
-    limit: LimitSchema.describe(
-      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
-    ),
+    limit: LimitSchema.unwrap()
+      .default(10)
+      .describe(
+        'Maximum rows, default 10, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
+      ),
     offset: OffsetSchema,
   }),
   output: z.object({
@@ -124,7 +128,7 @@ export const searchBillsTool = tool('canparl_search_bills', {
     {
       reason: 'unknown_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Session malformed or absent from the official bill session index.',
+      when: 'Session with a zero or out-of-range number, or absent from the official bill session index.',
       recovery: 'Call canparl_list_reference with topic sessions and choose a listed bill session.',
       retryable: false,
       thrownBy: 'service',
@@ -132,7 +136,7 @@ export const searchBillsTool = tool('canparl_search_bills', {
     {
       reason: 'invalid_bill_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Malformed bill code, chamber, or sponsor slug, or unrecognized type or status.',
+      when: 'Unrecognized chamber, type, or status, or a malformed sponsor slug.',
       recovery:
         "Retry canparl_search_bills with a value or shape the error names; canparl_list_reference topics bill_types and bill_statuses list types and statuses, and a sponsor is member.slug from canparl_get_member, a slug from an includeFormer canparl_search_members row, or a current MP's personId.",
       retryable: false,

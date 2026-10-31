@@ -84,19 +84,57 @@ function bool(value: JsonValue | undefined): boolean | null {
 type Feed = 'list' | 'dossier';
 const DATE_TIME =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|([+-])([01]\d|2[0-3]):([0-5]\d))?$/;
+const HOUR = 3_600_000;
 /**
- * Express an official date-time as `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, keeping fraction digits as
- * published. Offset-bearing values convert; an offset-less clock is UTC in the dossier feed, while
- * the list feed never states its zone. Any other value is relayed as published.
+ * Canada's daylight-saving rules, which America/Toronto has followed since 1974, newest first:
+ * `[first year, start month, start Sunday, end month, end Sunday]` with 0-based months and Sunday
+ * `n` counted from the month's start, or -1 for its last. Daylight time (UTC-4) runs from 02:00
+ * standard time on the start Sunday to 02:00 daylight time on the end Sunday; otherwise UTC-5.
+ */
+const OTTAWA_RULES = [
+  [2007, 2, 2, 10, 1],
+  [1987, 3, 1, 9, -1],
+  [1974, 3, -1, 9, -1],
+] as const;
+/** Day of the month of a month's `n`th Sunday, or of its last Sunday for -1. */
+function sunday(year: number, month: number, n: number): number {
+  if (n < 0) {
+    const last = new Date(Date.UTC(year, month + 1, 0));
+    return last.getUTCDate() - last.getUTCDay();
+  }
+  return 1 + ((7 - new Date(Date.UTC(year, month, 1)).getUTCDay()) % 7) + 7 * (n - 1);
+}
+/**
+ * The UTC epoch milliseconds of an Ottawa wall clock, given as its digits read as UTC, or null
+ * before 1974. A clock in the spring-forward gap takes standard time, the offset in force before
+ * the change; one in the repeated fall-back hour takes the earlier, daylight-time instant.
+ */
+function fromOttawa(wall: number): number | null {
+  const year = new Date(wall).getUTCFullYear();
+  const rule = OTTAWA_RULES.find(([from]) => year >= from);
+  if (!rule) return null;
+  const [, startMonth, startSunday, endMonth, endSunday] = rule;
+  const daylightFrom = Date.UTC(year, startMonth, sunday(year, startMonth, startSunday), 3);
+  const daylightUntil = Date.UTC(year, endMonth, sunday(year, endMonth, endSunday), 2);
+  return wall + (wall >= daylightFrom && wall < daylightUntil ? 4 : 5) * HOUR;
+}
+/**
+ * Express an official date-time as the UTC instant `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, keeping
+ * fraction digits as published. LEGISinfo's clocks are Ottawa wall time: the dossier publishes the
+ * digits without an offset, and the list feed renders the same digits as if they were UTC in
+ * Toronto's offset, so an offset-bearing value's UTC rendering recovers them. An offset-less list
+ * value, a value in neither shape, an impossible date, and a clock before 1974 are relayed as
+ * published.
  */
 function utcInstant(value: string | null, feed: Feed): string | null {
   const match = value === null ? null : DATE_TIME.exec(value);
   if (!match || (match[3] === undefined && feed === 'list')) return value;
   const [, clock = '', fraction = '', , sign, hours = '0', minutes = '0'] = match;
-  const local = Date.parse(`${clock}Z`);
-  if (Number.isNaN(local) || new Date(local).toISOString().slice(0, 19) !== clock) return value;
+  const digits = Date.parse(`${clock}Z`);
+  if (Number.isNaN(digits) || new Date(digits).toISOString().slice(0, 19) !== clock) return value;
   const offset = (sign === '-' ? -1 : 1) * (Number(hours) * 60 + Number(minutes)) * 60_000;
-  return `${new Date(local - offset).toISOString().slice(0, 19)}${fraction}Z`;
+  const instant = fromOttawa(digits - offset);
+  return instant === null ? value : `${new Date(instant).toISOString().slice(0, 19)}${fraction}Z`;
 }
 /** A dossier reading date-time in the same UTC representation as royal assent. */
 function reading(value: JsonValue | undefined): string | null {

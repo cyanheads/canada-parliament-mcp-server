@@ -290,6 +290,18 @@ describe('resolvePolitician', () => {
       2,
     ],
     [
+      // Denis Coderre's official personId 192 is another politician's numeric OpenParliament ID.
+      'a former personId, which keeps its OpenParliament meaning without an all-Parliaments read',
+      '192',
+      () => {
+        roster(1);
+        json(http, '/politicians/192/', profile({ url: '/politicians/192/' }));
+      },
+      '192',
+      [rosterUrl, `${origin}/politicians/192/`],
+      2,
+    ],
+    [
       'a numeric value answered by another canonical profile',
       '413',
       () => {

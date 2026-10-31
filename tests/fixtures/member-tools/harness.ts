@@ -25,12 +25,33 @@ export const lawrenceCannon = (): Record<string, unknown> =>
  * Captured OurCommons `/Members/en/{personId}/votes/xml` bodies (2026-10-21). Rows are verbatim and
  * in feed order; each file keeps a subset: `2897-45-1` divisions 169–179, every C-15 division, and
  * the date-time inversions 159/158, 147/146, 131/130; `2897-44-1`, `35933-latest` (the request
- * without a session query, 41-2), and `88721-45-1` (divisions 54–52, 53 Paired) keep three rows;
- * `empty` is the whole body for a session the member did not sit in.
+ * without a session query, 41-2), `88721-45-1` (divisions 54–52, 53 Paired), and `1463-38-1` (former
+ * member Jim Abbott, divisions 190–188, captured 2026-10-31) keep three rows; `empty` is the whole
+ * body for a session the member did not sit in.
  */
 export const realMemberVotes = (
-  name: '2897-45-1' | '2897-44-1' | '35933-latest' | '88721-45-1' | 'empty',
+  name: '2897-45-1' | '2897-44-1' | '35933-latest' | '88721-45-1' | '1463-38-1' | 'empty',
 ): string => readFileSync(new URL(`./member-votes/${name}.xml`, import.meta.url), 'utf8');
+/**
+ * Captured OurCommons roster bodies (2026-10-31), rows verbatim in feed order with the captured root:
+ * `current` (no `p`: 72029 Albas, 89156 Aboultaif), `p45` (those two plus departed 88961 Blair),
+ * `p41` (58733 Trudeau, 71341 Freeman, 71465 Fortin with a blank caucus, 35933 Cannan, 72029),
+ * `p38` (1463 Abbott, 192 Coderre, 25469 André, Labrador's 18 O'Brien and 29612 Russell, 25458
+ * Stronach, 13 Byrne), `p36` (1463 as Canadian Alliance, 880 Catterall with a blank caucus, 1519
+ * Hayes, 192), `all` (`p=*`: 1463, 35933, 58733, 192, 71341, 72029, 89156), `empty` (the whole `p=35`
+ * body), and `picker` (the Parliament and party dropdowns of `/Members/en/search`).
+ */
+export const realRoster = (
+  name: 'current' | 'p45' | 'p41' | 'p38' | 'p36' | 'all' | 'empty' | 'picker',
+): string =>
+  readFileSync(
+    new URL(`./rosters/${name}.${name === 'picker' ? 'html' : 'xml'}`, import.meta.url),
+    'utf8',
+  );
+export const rosterPicker = 'https://www.ourcommons.ca/Members/en/search';
+/** Official roster URL for one Parliament, or every Parliament with `*`. */
+export const parliamentRosterUrl = (parliament: number | '*') =>
+  `https://www.ourcommons.ca/Members/en/search/xml?p=${parliament}`;
 /** Official member-votes feed URL, with `s` only when a session is supplied. */
 export const memberVotesUrl = (personId: string, session?: string) =>
   `https://www.ourcommons.ca/Members/en/${personId}/votes/xml${session ? `?s=${session}` : ''}`;

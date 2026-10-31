@@ -62,6 +62,19 @@ function english(value: unknown): string | null {
 function bilingual(value: unknown): BilingualText {
   return { en: english(value), fr: text(nested(value, 'fr')) };
 }
+/** Source text with nothing visible is missing: OpenParliament sends untranslated fields as "". */
+function filled(value: string | null): string | null {
+  return value?.trim() ? value : null;
+}
+/** Both languages of a speech field, each converted on its own and null when blank. */
+function speechText(value: unknown, convert?: (html: string) => string): BilingualText {
+  const read = (source: string | null) => {
+    const present = filled(source);
+    return present && convert ? filled(convert(present)) : present;
+  };
+  const { en, fr } = bilingual(value);
+  return { en: read(en), fr: read(fr) };
+}
 function province(value: unknown): string | null {
   const raw = text(value);
   if (raw === null) return null;
@@ -324,27 +337,28 @@ export function parseVote(value: unknown): Vote {
     url: `${PUBLIC_ORIGIN}${path}`,
   };
 }
-/** Candidate speech parser; committee exclusion belongs to the bounded tool scan. */
+/**
+ * Candidate speech parser; committee exclusion and language selection belong to the bounded tool
+ * scan. Pre-2006 rows carry a blank `source_id`, so the source path identifies them.
+ */
 export function parseSpeech(value: unknown): Speech {
   const raw = record(value);
   const path = sourcePath(raw.url, DOCUMENT_PATH);
-  const content = english(raw.content);
   const actor = raw.politician_url == null ? null : politicianPath(raw.politician_url);
   const { procedural } = raw;
   if (procedural != null && typeof procedural !== 'boolean') return malformed('procedural');
   const time = requiredText(raw.time, 'time');
   if (!/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(time)) return malformed('time');
   date(time.slice(0, 10));
-  const id = text(raw.source_id) ?? path;
   return {
-    id,
-    speaker: english(raw.attribution),
+    id: filled(text(raw.source_id)) ?? path,
+    speaker: speechText(raw.attribution),
     politician: actor?.split('/')[2] ?? null,
     membershipUrl: optionalPath(raw.politician_membership_url, MEMBERSHIP_PATH),
     time,
-    h1: english(raw.h1),
-    h2: english(raw.h2),
-    content: content === null ? null : htmlToText(content),
+    h1: speechText(raw.h1),
+    h2: speechText(raw.h2),
+    content: speechText(raw.content, htmlToText),
     procedural: procedural ?? null,
     url: `${PUBLIC_ORIGIN}${path}`,
     debateUrl: optionalPath(raw.document_url, DOCUMENT_PATH),

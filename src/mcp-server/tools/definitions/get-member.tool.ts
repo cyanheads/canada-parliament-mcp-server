@@ -5,12 +5,15 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
+  BILL_CODE_FORMAT,
   clampCount,
   filterFailure,
   normalizeBillCode,
   normalizeFilter,
   normalizeSession,
   normalizeSlug,
+  PERSON_ID,
+  PERSON_ID_FORMAT,
   paginate,
   rejectFilter,
 } from '@/domain/normalization.js';
@@ -21,6 +24,7 @@ import {
   COUNT_CEILING,
   OffsetSchema,
   OptionalStringSchema,
+  optionalFormat,
   SessionInputSchema,
   type Source,
   SourceSchema,
@@ -35,9 +39,10 @@ import {
   type MemberVote,
   type OurCommonsMember,
   type RecordedBallot,
+  type RosterMember,
 } from '@/services/ourcommons/index.js';
 import { formatResult, renderValue } from './_format.js';
-import { crosswalkProfile, PERSON_ID } from './_member-identity.js';
+import { crosswalkProfile } from './_member-identity.js';
 import { MemberSummarySchema } from './search-members.tool.js';
 
 const nullableText = () => z.string().nullable();
@@ -197,14 +202,14 @@ function available<T>(
 /** Read a verified public profile without projecting current attributes into history. */
 export const getMemberTool = tool('canparl_get_member', {
   description:
-    "Read one House MP by a returned OpenParliament slug or official current personId. Pass exactly one identifier from canparl_search_members detailLookup. Official profiles survive unavailable OpenParliament enrichment. Recent ballots come newest first from the official House member-votes feed when the member has one official personId, filterable by votesSession (default: the member's latest session) and votesBillCode; otherwise from OpenParliament. Sponsored bills and recent ballots are independently pageable; set their limits to zero for profile-only lookup.",
+    "Read one House MP by a returned OpenParliament slug or official personId, current or former (36th Parliament onward). Pass exactly one identifier from canparl_search_members detailLookup. Official profiles survive unavailable OpenParliament enrichment. Recent ballots come newest first from the official House member-votes feed when the member has one official personId, filterable by votesSession (default: the member's latest session) and votesBillCode; otherwise from OpenParliament. Sponsored bills and recent ballots are independently pageable; set their limits to zero for profile-only lookup.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     slug: OptionalStringSchema.describe(
       'Returned OpenParliament slug, politician path, or HTTPS OpenParliament profile URL; never a guessed name. A digit-only value equal to a current official personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.',
     ),
-    personId: OptionalStringSchema.describe(
-      'Decimal official current person ID; distinct from an OpenParliament slug.',
+    personId: optionalFormat(PERSON_ID_FORMAT).describe(
+      "Decimal official person ID, distinct from an OpenParliament slug: a current member's, or a former member's from the 36th Parliament onward, such as a canparl_search_members parliament row or a canparl_get_vote ballot. A former member's profile carries their latest Parliament's caucus and riding.",
     ),
     sponsoredBills: z
       .number()
@@ -229,7 +234,7 @@ export const getMemberTool = tool('canparl_get_member', {
     votesSession: SessionInputSchema.describe(
       "Official ballot session such as 44-1; omitted means the member's latest session in the feed. Needs one official personId.",
     ),
-    votesBillCode: OptionalStringSchema.describe(
+    votesBillCode: optionalFormat(BILL_CODE_FORMAT).describe(
       'Keep official ballots on this bill, including a split-bill suffix such as C-15A; accepts c15, C 15, or bill C-15. Needs one official personId.',
     ),
   }),
@@ -357,7 +362,7 @@ export const getMemberTool = tool('canparl_get_member', {
     {
       reason: 'invalid_member_identifier',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither, both, or malformed identifiers supplied.',
+      when: 'Neither or both identifiers supplied, or a slug that is not an OpenParliament politician reference.',
       recovery:
         'Call canparl_search_members and pass exactly one identifier from a result detailLookup to canparl_get_member.',
       retryable: false,
@@ -365,7 +370,7 @@ export const getMemberTool = tool('canparl_get_member', {
     {
       reason: 'member_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Slug missing or answered by another profile, or official person ID absent from current roster.',
+      when: 'Slug missing or answered by another profile, or official person ID in neither the current roster nor the all-Parliaments roster.',
       recovery:
         'Call canparl_search_members with includeFormer true and a surname or full name, then pass a returned slug to canparl_get_member.',
       retryable: false,
@@ -373,19 +378,11 @@ export const getMemberTool = tool('canparl_get_member', {
     {
       reason: 'unsupported_vote_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'votesSession malformed or absent from the official division picker.',
+      when: 'votesSession with a zero or out-of-range number, or absent from the official division picker.',
       recovery:
         'Call canparl_list_reference with topic sessions and pass a session supporting House divisions as votesSession, or omit it.',
       retryable: false,
       thrownBy: 'service',
-    },
-    {
-      reason: 'invalid_vote_filter',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'votesBillCode is not a House or Senate bill code.',
-      recovery:
-        'Retry canparl_get_member with votesBillCode written like C-15, C-15A, or S-1001, or omit it.',
-      retryable: false,
     },
     {
       reason: 'upstream_blocked',
@@ -393,6 +390,15 @@ export const getMemberTool = tool('canparl_get_member', {
       when: 'An official parliamentary source refuses the request with HTTP 403.',
       recovery: 'Retry the affected official source later for parliamentary data.',
       retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'roster_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The official all-Parliaments roster came back empty while resolving a former personId.',
+      recovery:
+        'Retry canparl_get_member later, or call canparl_search_members with includeFormer true and pass a returned slug.',
+      retryable: true,
       thrownBy: 'service',
     },
   ],
@@ -406,11 +412,6 @@ export const getMemberTool = tool('canparl_get_member', {
             'slug|personId',
             'Expected exactly one of slug or personId, copied from a canparl_search_members detailLookup.',
           );
-        if (input.personId && !PERSON_ID.test(input.personId))
-          throw rejectFilter(
-            'personId',
-            'Expected a decimal official person ID, as in a canparl_search_members detailLookup.',
-          );
         slug = normalizeFilter('slug', input.slug, normalizeSlug);
       } catch (error) {
         throw ctx.fail('invalid_member_identifier', ...filterFailure(error));
@@ -423,12 +424,8 @@ export const getMemberTool = tool('canparl_get_member', {
       } catch (error) {
         throw ctx.fail('unsupported_vote_session', ...filterFailure(error));
       }
-      let votesBillCode: string | undefined;
-      try {
-        votesBillCode = normalizeFilter('votesBillCode', input.votesBillCode, normalizeBillCode);
-      } catch (error) {
-        throw ctx.fail('invalid_vote_filter', ...filterFailure(error));
-      }
+      const votesBillCode =
+        input.votesBillCode === undefined ? undefined : normalizeBillCode(input.votesBillCode);
       const billLimit = clampCount('sponsoredBills', input.sponsoredBills, SPONSORED_BILLS_CAP);
       const voteLimit = clampCount('recentVotes', input.recentVotes, RECENT_VOTES_CAP);
       const service = getOpenParliamentService();
@@ -452,14 +449,20 @@ export const getMemberTool = tool('canparl_get_member', {
         requestedPersonId = slug;
         slug = undefined;
       }
-      let official: OurCommonsMember | undefined;
+      let official: RosterMember | undefined;
       let profile: PoliticianProfile | undefined;
       let verifiedCurrent: boolean | null = null;
       let crosswalkFailure: Failure | null = null;
       if (requestedPersonId) {
         official = (await currentRoster()).find((row) => row.personId === requestedPersonId);
-        if (!official) throw ctx.fail('member_not_found');
-        verifiedCurrent = true;
+        verifiedCurrent = !!official;
+        if (!official) {
+          // A former member's row from their latest Parliament; slug inputs never reach this read.
+          const everyone = await getOurCommonsService().listAllMembers(request);
+          provenance.push(...everyone.provenance);
+          official = everyone.data.find((row) => row.personId === requestedPersonId);
+          if (!official) throw ctx.fail('member_not_found');
+        }
         try {
           profile = (await crosswalkProfile(official, request, provenance)) ?? undefined;
           if (!profile) crosswalkFailure = unavailableFailure('enrichment_unavailable');
@@ -653,6 +656,8 @@ export const getMemberTool = tool('canparl_get_member', {
         riding: official ? official.riding : (profile?.riding ?? null),
         province: official ? official.province : (profile?.province ?? null),
         current: verifiedCurrent,
+        from: official?.from ?? null,
+        to: official?.to ?? null,
         url: identity.url,
         detailLookup,
         gender: profile?.gender ?? null,

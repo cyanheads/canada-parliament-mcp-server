@@ -16,6 +16,7 @@ import {
   parseVote,
 } from '@/services/openparliament/parsing.js';
 import { lawrenceCannon } from '../../fixtures/member-tools/harness.js';
+import { hansard } from '../../fixtures/speech-tools/harness.js';
 
 const actor = { name: 'Synthetic Member', url: '/politicians/synthetic-member/' };
 const membership = {
@@ -219,17 +220,79 @@ describe('OpenParliament source records', () => {
     expect(
       parseSpeech({
         ...speech,
-        content: { en: `<p>${long}</p>` },
+        content: { en: `<p>${long}</p>`, fr: `<p>${long}</p>` },
         attribution: { en: 'The Speaker' },
       }).content,
-    ).toBe(long);
+    ).toEqual({ en: long, fr: long });
+  });
+  it('renders each table row in Hansard speech content as one paragraph of cells joined by " | "', () => {
+    const { content } = parseSpeech({
+      ...hansard().sgro,
+      content: {
+        en: '<p data-HoCid="8857143" data-originallang="en">Mr. Speaker, the funding by year is as follows:</p>\n<table>\n  <tr><th>Year</th><th>Program</th><th>Amount</th></tr>\n  <tr><td>2025</td><td></td><td>100</td></tr>\n</table>\n<p data-HoCid="8857144" data-originallang="en">Those are the figures.</p>',
+        fr: '<p data-HoCid="8857143" data-originallang="en">Monsieur le Président, voici le financement par année :</p><table><tbody><tr><th>Année</th><th>Montant</th></tr><tr><td>2025</td><td>100</td></tr></tbody></table>',
+      },
+    });
+    expect(content.en).toBe(
+      'Mr. Speaker, the funding by year is as follows:\n\nYear | Program | Amount\n\n2025 |  | 100\n\nThose are the figures.',
+    );
+    expect(content.fr?.trimEnd()).toBe(
+      'Monsieur le Président, voici le financement par année :\n\nAnnée | Montant\n\n2025 | 100',
+    );
+    /** The captured 2006-05-12 Stockwell Day row; each language's text is a verbatim slice. */
+    const table =
+      '<table><tr><td>Province / Territory<br> </td><td>Number of ATCs issued for protection against wildlife<br> </td><td> Number of ATCs issued to armoured vehicle industry<br> </td></tr><tr><td>British Columbia/Yukon<br> </td><td> 434<br> </td><td> 2,160<br> </td></tr><tr><td>Alberta/Northwest Territories<br> </td><td>116<br> </td><td>1,489<br> </td></tr><tr><td> Saskatchewan<br> </td><td>19<br> </td><td> 619<br> </td></tr><tr><td>Manitoba/Nunavut<br> </td><td>9<br> </td><td> 645<br> </td></tr><tr><td> Ontario<br> </td><td> 235<br> </td><td>4,712<br> </td></tr><tr><td> Quebec<br> </td><td>73<br> </td><td>2,566<br> </td></tr><tr><td>New Brunswick<br> </td><td>0<br> </td><td>346<br> </td></tr><tr><td>Nova Scotia <br> </td><td>0<br> </td><td>569<br> </td></tr><tr><td>Newfoundland and Labrador<br> </td><td> 0<br> </td><td>133<br> </td></tr><tr><td> Prince Edward Island<br> </td><td>0<br> </td><td>56<br> </td></tr><tr><td> Total <br> </td><td>886<br> </td><td>13,295<br> </td></tr></table>';
+    const intro = {
+      en: 'a) Nationally consistent standards for reporting authorizations to carry, ATC, issued and the centralized system to record the information were introduced for September 2004. ATCs have been issued as indicated in the following table between September 1, 2004, and April 20, 2006: ',
+      fr: 'a) C’est en septembre 2004 qu’ont été introduites les normes uniformes nationales pour la présentation de rapports sur les autorisations de port, AP, délivrées et qu’a été mis en place le système pour consigner l’information. Les AP ont été délivrées entre le 1er septembre 2004 et le 20 avril 2006 conformément au tableau suivant: ',
+    };
+    const stockwellDay = parseSpeech({
+      time: '2006-05-12 12:05:00',
+      attribution: { en: 'Hon. Stockwell Day (Minister of Public Safety, CPC)', fr: '' },
+      content: {
+        en: `<p data-HoCid="13614">${intro.en}</p>\n${table}`,
+        fr: `<p data-HoCid="13614">${intro.fr}</p>\n${table}`,
+      },
+      url: '/debates/2006/5/12/stockwell-day-1/',
+      politician_url: '/politicians/stockwell-day/',
+      politician_membership_url: '/politicians/memberships/1282/',
+      procedural: false,
+      source_id: 'p13613',
+      h1: { en: 'Routine Proceedings', fr: '' },
+      h2: { en: 'Questions on the Order Paper', fr: '' },
+      document_url: '/debates/2006/5/12/',
+    });
+    const rows = [
+      'Province / Territory | Number of ATCs issued for protection against wildlife | Number of ATCs issued to armoured vehicle industry',
+      'British Columbia/Yukon | 434 | 2,160',
+      'Alberta/Northwest Territories | 116 | 1,489',
+      'Saskatchewan | 19 | 619',
+      'Manitoba/Nunavut | 9 | 645',
+      'Ontario | 235 | 4,712',
+      'Quebec | 73 | 2,566',
+      'New Brunswick | 0 | 346',
+      'Nova Scotia | 0 | 569',
+      'Newfoundland and Labrador | 0 | 133',
+      'Prince Edward Island | 0 | 56',
+      'Total | 886 | 13,295',
+    ];
+    expect(stockwellDay.content).toEqual({
+      en: `${intro.en}\n\n${rows.join('\n\n')}\n\n`,
+      fr: `${intro.fr}\n\n${rows.join('\n\n')}\n\n`,
+    });
+    expect(stockwellDay.speaker).toEqual({
+      en: 'Hon. Stockwell Day (Minister of Public Safety, CPC)',
+      fr: null,
+    });
   });
   it('retains institutional and committee raw candidates and missing English text', () => {
     expect(parseSpeech({ ...speech, content: { fr: 'Texte' } })).toMatchObject({
       politician: null,
-      content: null,
+      content: { en: null, fr: 'Texte' },
       procedural: null,
-      h1: null,
+      speaker: { en: null, fr: null },
+      h1: { en: null, fr: null },
+      h2: { en: null, fr: null },
       membershipUrl: null,
     });
     expect(
@@ -243,6 +306,63 @@ describe('OpenParliament source records', () => {
       debateUrl: 'https://openparliament.ca/committees/example/1/',
       procedural: true,
     });
+  });
+  it.each(
+    [undefined, null, '', ' \r\n\t '].flatMap((value) =>
+      (['en', 'fr'] as const).map((language) => [language, value] as const),
+    ),
+  )(
+    'keeps a blank %s speech value %j null, never filled from the other language',
+    (language, value) => {
+      const other = language === 'en' ? 'fr' : 'en';
+      const both = (present: string) => ({
+        ...(value === undefined ? {} : { [language]: value }),
+        [other]: present,
+      });
+      const parsed = parseSpeech({
+        ...speech,
+        attribution: both('Attribution'),
+        h1: both('Heading one'),
+        h2: both('Heading two'),
+        content: both('<p>Text &amp; more</p>'),
+      });
+      for (const [field, present] of [
+        ['speaker', 'Attribution'],
+        ['h1', 'Heading one'],
+        ['h2', 'Heading two'],
+        ['content', 'Text & more'],
+      ] as const)
+        expect(parsed[field]).toEqual({ [language]: null, [other]: present });
+    },
+  );
+  it('treats speech HTML without visible text as missing in each language', () => {
+    expect(
+      parseSpeech({ ...speech, content: { en: '<p> </p>\n<p></p>', fr: '<p>&nbsp;</p><br>' } })
+        .content,
+    ).toEqual({ en: null, fr: null });
+  });
+  it.each([undefined, null, '', '  '])(
+    'identifies a speech by its source path when source_id is %j',
+    (sourceId) => {
+      expect(
+        parseSpeech({ ...speech, ...(sourceId === undefined ? {} : { source_id: sourceId }) }).id,
+      ).toBe('/debates/2026/10/20/1/');
+      expect(parseSpeech({ ...speech, source_id: '13107100' }).id).toBe('13107100');
+    },
+  );
+  it.each([
+    { content: { en: '<p>Text</p>', fr: 12 } },
+    { attribution: { en: 'Speaker', fr: [] } },
+    { h2: { fr: true } },
+    { h1: 'Heading' },
+  ])('rejects a non-text speech language value %j without retry', (extra) => {
+    const run = () => parseSpeech({ ...speech, ...extra });
+    expect(run).toThrow();
+    try {
+      run();
+    } catch (error) {
+      expect(error).toMatchObject({ data: { retryable: false } });
+    }
   });
   it('distinguishes malformed JSON from transient HTML', () => {
     expect(() => parseJson('{')).toThrow();

@@ -6,12 +6,18 @@ import { RESPONSE_BUDGET } from '@/mcp-server/tools/definitions/_format.js';
 import { searchSpeechesTool } from '@/mcp-server/tools/definitions/search-speeches.tool.js';
 import { disposeOurCommonsService, initOurCommonsService } from '@/services/ourcommons/index.js';
 import { wireBytes } from '../fixtures/bill-tools/harness.js';
-import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
+import {
+  type ArgumentRejection,
+  assertArgumentRejection,
+  assertFilterRejection,
+  type FilterRejection,
+} from '../fixtures/filter-rejection.js';
 import {
   actor,
   api,
   bill,
   failure,
+  hansard,
   member,
   membership,
   pages,
@@ -34,6 +40,18 @@ const MISSING =
   'Historical party or riding is unavailable for some returned speeches; nulls never substitute current affiliation.';
 const oversized =
   'The response exceeds the 24000-byte budget with one speech, returned whole; call canparl_search_speeches with nextOffset and identical filters to continue.';
+const NO_MATCH =
+  'No indexed speeches matched; broaden dates or remove contains and retry canparl_search_speeches. This does not establish that no parliamentary speech occurred.';
+const textless = (count: number, language: 'English' | 'French') =>
+  `${count} scanned ${count === 1 ? 'candidate' : 'candidates'} had no ${language} text and could not match contains.`;
+/** Plain text of the captured 2025-06-19 Sgro statement, read from its `content` HTML. */
+const SGRO_EN =
+  "Mr. Speaker, our government is taking strong, targeted action to support the people of Ukraine and to hold Russia accountable for its ongoing war of aggression. In one of our most significant sanctions packages since the invasion began in 2022, we are imposing new sanctions on 77 individuals and 39 entities, and restricting trade on nearly 1,000 items, including those linked to chemical weapons, advanced technologies and critical industrial goods.\n\nWe are also expanding our crackdown on Russia's shadow fleet by listing over 200 additional vessels, now totalling more than 300, and banning all related services to disrupt Russia's global shipping networks.\n\nSanctions also target key financial institutions, energy companies and individuals enabling Russia's military and disinformation efforts. Canada stands firmly with the people of Ukraine as well as all those in the G7 whose courage and resilience continue to—";
+const SGRO_FR =
+  "Monsieur le Président, le gouvernement prend des mesures énergiques et ciblées pour soutenir le peuple ukrainien et pour tenir la Russie responsable de la guerre d'agression qu'elle mène en ce moment. Dans l'un de nos plus importants ensembles de sanctions depuis le début de l'invasion en 2022, nous imposons de nouvelles sanctions à 77 personnes et 39 entités et nous restreignons le commerce de près de 1 000 articles, y compris ceux liés aux armes chimiques, aux technologies de pointe et aux produits industriels essentiels.\n\nNous élargissons également nos mesures de répression contre la flotte fantôme de la Russie en y ajoutant plus de 200 navires, pour un total de plus de 300, et en interdisant tous les services connexes afin de perturber les réseaux mondiaux de transport maritime de la Russie.\n\nCes sanctions ciblent également des institutions financières clés, des sociétés d'énergie et des particuliers qui facilitent les efforts militaires et de désinformation de la Russie. Le Canada demeure résolument solidaire du peuple ukrainien ainsi que de tous les membres des pays du G7 dont le courage et la résilience continuent de...";
+/** French plain text of the captured 2015-03-11 Strahl speech. */
+const STRAHL_FR =
+  "Monsieur le Président, comme je l'ai déjà mentionné, et comme la députée l'a souligné elle aussi, cette décision a été prise par la Ville d'Ottawa. Je le répète, nous établissons des partenariats avec les villes, les centres d'amitié ainsi que les fournisseurs de services partout au pays pour offrir des services aux Canadiens autochtones à l'endroit où ils vivent, et nous poursuivrons nos efforts en ce sens dans le cadre de la Stratégie pour les Autochtones vivant en milieu urbain.\n\nNous continuerons de travailler avec les provinces et les villes pour lutter contre l'itinérance. Nous souhaitons continuer dans cette voie, non seulement en faisant preuve de respect à l'égard des deniers publics, mais aussi en tenant compte des particularités culturelles des Autochtones.";
 
 describe('canparl_search_speeches production contract', () => {
   let http: ReturnType<typeof setup>;
@@ -87,7 +105,7 @@ describe('canparl_search_speeches production contract', () => {
     http.route({ match: `${api}${member}`, respond: Response.json(membership()) });
     const data = await success({
       politician: ' https://openparliament.ca/politicians/river-example/ ',
-      billDebated: { session: '045-01', code: ' bill s321 ' },
+      billDebated: { session: ' 045-01 ', code: ' bill s–321 ' },
       mentionedBill: { session: { parliament: 45, session: 1 }, code: 'S321' },
       dateTo: '2026-10-19',
       contains: ' e\u0301cole [x].* ',
@@ -273,6 +291,274 @@ describe('canparl_search_speeches production contract', () => {
       scanned: 4,
     });
   });
+  it('excludes committees and missing documents in French while keeping a row without French text', async () => {
+    pages(
+      http,
+      [
+        speech(1, { document_url: '/committees/finance/1/' }),
+        speech(2, { url: '/committees/finance/2/' }),
+        speech(3, { document_url: null }),
+        speech(4, {
+          politician_url: null,
+          content: { en: 'English only phrase' },
+          h1: null,
+          h2: null,
+          attribution: null,
+        }),
+      ],
+      { time__gte: '2026-10-19' },
+    );
+    expect(await success({ language: 'fr' })).toMatchObject({
+      scanned: 4,
+      excludedCommittees: 3,
+      speeches: [
+        {
+          id: '4',
+          speaker: null,
+          h1: null,
+          h2: null,
+          content: null,
+          politician: null,
+          party: null,
+          riding: null,
+        },
+      ],
+    });
+    // Excluded committee rows are counted in excludedCommittees, not as missing French text.
+    expect(await success({ language: 'fr', contains: 'English only phrase' })).toMatchObject({
+      speeches: [],
+      scanned: 4,
+      excludedCommittees: 3,
+      notice: `${SUBSTANTIVE} ${EXCLUDED} ${textless(1, 'French')} ${NO_MATCH}`,
+    });
+  });
+  /** The captured Sgro statement of 2025-06-19, its real membership, and a verified profile. */
+  function sgro() {
+    const rows = hansard();
+    http.route(
+      {
+        match: `${api}/politicians/judy-sgro/`,
+        respond: Response.json({ url: '/politicians/judy-sgro/', name: 'Judy Sgro' }),
+      },
+      {
+        match: `${api}/politicians/memberships/4375/`,
+        respond: Response.json(rows.sgroMembership),
+      },
+    );
+    pages(http, [rows.sgro], {
+      politician: '/politicians/judy-sgro/',
+      time__gte: '2025-06-19',
+      time__lt: '2025-06-20',
+    });
+  }
+  const sgroScope = { politician: 'judy-sgro', dateFrom: '2025-06-19', dateTo: '2025-06-19' };
+  /** Fields of the Sgro speech that no language selection changes. */
+  const sgroIdentity = {
+    id: '13107100',
+    politician: 'judy-sgro',
+    membershipUrl: 'https://openparliament.ca/politicians/memberships/4375/',
+    party: 'Liberal Party of Canada',
+    riding: 'Humber River—Black Creek',
+    time: '2025-06-19 14:05:00',
+    procedural: false,
+    url: 'https://openparliament.ca/debates/2025/6/19/judy-sgro-1/',
+    debateUrl: 'https://openparliament.ca/debates/2025/6/19/',
+  };
+  it('returns the captured English record by default and matches no French wording in it', async () => {
+    sgro();
+    const english = await success({ ...sgroScope, contains: 'shadow fleet' });
+    expect(english.speeches).toEqual([
+      {
+        ...sgroIdentity,
+        speaker: 'Hon. Judy A. Sgro (Humber River—Black Creek, Lib.)',
+        h1: 'Statements by Members',
+        h2: 'Ukraine',
+        content: SGRO_EN,
+      },
+    ]);
+    expect(await success({ ...sgroScope, contains: 'flotte fantôme' })).toMatchObject({
+      speeches: [],
+      scanned: 1,
+      exhausted: true,
+    });
+  });
+  it('selects French text, headings, and attribution from the same row, keeping English affiliation', async () => {
+    sgro();
+    const french = await success({ ...sgroScope, language: 'fr', contains: 'flotte fantôme' });
+    expect(french).toMatchObject({
+      scanned: 1,
+      exhausted: true,
+      nextOffset: null,
+      appliedFilters: { politician: 'judy-sgro', contains: 'flotte fantôme', language: 'fr' },
+    });
+    expect(french.speeches).toEqual([
+      {
+        ...sgroIdentity,
+        speaker: "L'hon. Judy A. Sgro (Humber River—Black Creek, Lib.)",
+        h1: 'Déclarations de députés',
+        h2: "L'Ukraine",
+        content: SGRO_FR,
+      },
+    ]);
+    expect(await success({ ...sgroScope, language: 'fr', contains: 'shadow fleet' })).toMatchObject(
+      { speeches: [], scanned: 1 },
+    );
+    expect(
+      await success({ ...sgroScope, language: 'en', contains: 'flotte fantôme' }),
+    ).toMatchObject({ speeches: [], appliedFilters: { language: 'en' } });
+  });
+  it.each<[string, string[]]>([
+    ['flotte fantome', [SGRO_FR]],
+    ['flotte fantomes', []],
+  ])(
+    'matches French contains %j ignoring accents, relaying the text as published',
+    async (contains, content) => {
+      sgro();
+      const data = await success({ ...sgroScope, language: 'fr', contains });
+      expect((data.speeches as { content: string }[]).map((row) => row.content)).toEqual(content);
+      expect(data).toMatchObject({
+        shown: content.length,
+        scanned: 1,
+        exhausted: true,
+        appliedFilters: { contains, language: 'fr' },
+      });
+    },
+  );
+  it('returns a blank English source attribution as null', async () => {
+    pages(http, [hansard().procedural2026], {
+      time__gte: '2026-10-30',
+      time__lt: '2026-10-31',
+      procedural: undefined,
+    });
+    const data = await success({
+      dateFrom: '2026-10-30',
+      dateTo: '2026-10-30',
+      substantiveOnly: false,
+    });
+    expect(data.speeches).toMatchObject([
+      {
+        id: 'p5',
+        speaker: null,
+        h1: "Private Members' Business",
+        h2: 'National Strategy for Children and Youth Act',
+        content: expect.stringContaining('(Bill S-212. On the Order'),
+      },
+    ]);
+  });
+  it('returns a blank French source attribution as null beside French headings and text', async () => {
+    pages(http, [hansard().procedural2026], {
+      time__gte: '2026-10-30',
+      time__lt: '2026-10-31',
+      procedural: undefined,
+    });
+    const data = await success({
+      dateFrom: '2026-10-30',
+      dateTo: '2026-10-30',
+      substantiveOnly: false,
+      language: 'fr',
+    });
+    expect(data).toMatchObject({
+      appliedFilters: { language: 'fr', substantiveOnly: false },
+      speeches: [
+        {
+          id: 'p5',
+          speaker: null,
+          h1: 'Ordres émanant des députés',
+          h2: 'Loi sur la stratégie nationale pour les enfants et les jeunes',
+          content: expect.stringContaining('(Projet de loi S‑212.'),
+        },
+      ],
+    });
+  });
+  it.each<[string | undefined, Record<string, string | null>]>([
+    [
+      undefined,
+      {
+        speaker: 'Mr. Duhamel',
+        h1: 'Government Orders',
+        h2: 'Income Tax Act',
+        content: 'I am listening.',
+      },
+    ],
+    ['fr', { speaker: null, h1: null, h2: null, content: null }],
+  ])(
+    'never fills a missing field of a 1994 speech from the other language, language %s',
+    async (language, text) => {
+      memberships();
+      pages(http, [hansard().duhamel1994], { time__gte: '1994-02-09', time__lt: '1994-02-10' });
+      const data = await success({
+        dateFrom: '1994-02-09',
+        dateTo: '1994-02-09',
+        ...(language ? { language } : {}),
+      });
+      // A blank source_id falls back to the speech path, never an empty identifier.
+      expect(data.speeches).toEqual([
+        {
+          id: '/debates/1994/2/9/ronald-j-duhamel-5/',
+          politician: '4255',
+          membershipUrl: 'https://openparliament.ca/politicians/memberships/3114/',
+          party: null,
+          riding: null,
+          time: '1994-02-09 19:45:00',
+          procedural: false,
+          url: 'https://openparliament.ca/debates/1994/2/9/ronald-j-duhamel-5/',
+          debateUrl: 'https://openparliament.ca/debates/1994/2/9/',
+          ...text,
+        },
+      ]);
+    },
+  );
+  it('counts scanned candidates without selected-language text only when contains is set', async () => {
+    memberships();
+    const rows = hansard();
+    pages(http, [rows.duhamel1994, rows.someMembers2009, rows.strahl2015], {
+      time__gte: '1994-01-01',
+    });
+    const french = await success({
+      dateFrom: '1994-01-01',
+      language: 'fr',
+      contains: 'itinérance',
+    });
+    expect(french).toMatchObject({
+      scanned: 3,
+      exhausted: true,
+      notice: `${SUBSTANTIVE} ${textless(1, 'French')} ${MISSING}`,
+    });
+    expect(french.speeches).toEqual([
+      {
+        id: '8611105',
+        speaker: 'M. Mark Strahl',
+        politician: 'mark-strahl',
+        membershipUrl: 'https://openparliament.ca/politicians/memberships/4101/',
+        party: null,
+        riding: null,
+        time: '2015-03-11 19:40:00',
+        h1: "Motion D'Ajournement",
+        h2: null,
+        content: STRAHL_FR,
+        procedural: false,
+        url: 'https://openparliament.ca/debates/2015/3/11/mark-strahl-8/',
+        debateUrl: 'https://openparliament.ca/debates/2015/3/11/',
+      },
+    ]);
+    expect(
+      await success({ dateFrom: '1994-01-01', language: 'fr', contains: 'never present' }),
+    ).toMatchObject({
+      speeches: [],
+      notice: `${SUBSTANTIVE} ${textless(1, 'French')} ${NO_MATCH}`,
+    });
+    const all = await success({ dateFrom: '1994-01-01', language: 'fr' });
+    expect(all).toMatchObject({ shown: 3, notice: `${SUBSTANTIVE} ${MISSING}` });
+    expect(all.speeches).toMatchObject([
+      { content: null, speaker: null },
+      { content: " D'accord.", speaker: null, h1: null, h2: null },
+      { id: '8611105' },
+    ]);
+    expect(await success({ dateFrom: '1994-01-01', contains: 'never present' })).toMatchObject({
+      speeches: [],
+      notice: `${SUBSTANTIVE} ${NO_MATCH}`,
+    });
+  });
   it('allows procedural records only when explicitly requested and omits blank filters', async () => {
     pages(http, [speech(1, { procedural: true })], {
       time__gte: '2026-10-19',
@@ -307,7 +593,6 @@ describe('canparl_search_speeches production contract', () => {
       { field: 'politician', rejected: 'evil.test', shape: slug },
     ],
     [{ politician: 'https://' }, { field: 'politician', rejected: 'https://', shape: slug }],
-    [{ billDebated: {} }, { field: 'billDebated.session', rejected: '', shape: session }],
     [
       { billDebated: { session: '45-0', code: 'S321' } },
       { field: 'billDebated.session', rejected: '45-0', shape: session },
@@ -315,22 +600,6 @@ describe('canparl_search_speeches production contract', () => {
     [
       { mentionedBill: { session: '9007199254740992-1', code: 'S321' } },
       { field: 'mentionedBill.session', rejected: '9007199254740992-1', shape: session },
-    ],
-    [
-      { mentionedBill: { code: 'S321' } },
-      { field: 'mentionedBill.session', rejected: '', shape: session },
-    ],
-    [
-      { billDebated: { session: '45-1', code: '' } },
-      { field: 'billDebated.code', rejected: '', shape: code },
-    ],
-    [
-      { mentionedBill: { session: '45-1', code: 'C-0' } },
-      { field: 'mentionedBill.code', rejected: 'C-0', shape: code },
-    ],
-    [
-      { mentionedBill: { session: '45-1', code: 'C - 9' } },
-      { field: 'mentionedBill.code', rejected: 'C - 9', shape: code },
     ],
     [{ dateFrom: '2026-02-30' }, { field: 'dateFrom', rejected: '2026-02-30', shape: date }],
     [
@@ -348,6 +617,35 @@ describe('canparl_search_speeches production contract', () => {
       searchSpeechesTool.errors!.find((error) => error.reason === 'invalid_speech_filter')!,
     );
     assertFilterRejection(result, expected);
+    expect(http.calls).toHaveLength(0);
+  });
+  it.each<[Record<string, unknown>, ArgumentRejection]>([
+    [{ billDebated: {} }, { lines: ['billDebated.session', 'billDebated.code'], rejected: '' }],
+    [{ mentionedBill: { code: 'S321' } }, { lines: ['mentionedBill.session'], rejected: '' }],
+    [
+      { billDebated: { session: '45-1', code: '' } },
+      { lines: [`billDebated.code: ${code}`], rejected: '' },
+    ],
+    [
+      { billDebated: { session: '', code: 'S321' } },
+      { lines: [`billDebated.session: ${session}`], rejected: '' },
+    ],
+    [
+      { mentionedBill: { session: '45/1', code: 'S321' } },
+      { lines: [`mentionedBill.session: ${session}`], rejected: '45/1' },
+    ],
+    [
+      { mentionedBill: { session: '45-1', code: 'C-0' } },
+      { lines: [`mentionedBill.code: ${code}`], rejected: 'C-0' },
+    ],
+    [
+      { mentionedBill: { session: '45-1', code: 'C - 9' } },
+      { lines: [`mentionedBill.code: ${code}`], rejected: 'C - 9' },
+    ],
+    [{ dateFrom: 'yesterday' }, { lines: [`dateFrom: ${date}.`], rejected: 'yesterday' }],
+    [{ dateTo: '2026/10/20' }, { lines: [`dateTo: ${date}.`], rejected: '2026/10/20' }],
+  ])('rejects %j by its advertised format before HTTP', async (input, expected) => {
+    assertArgumentRejection(await call(input), expected);
     expect(http.calls).toHaveLength(0);
   });
   it.each([
@@ -385,6 +683,9 @@ describe('canparl_search_speeches production contract', () => {
     { limit: 10_001 },
     { offset: -1 },
     { billDebated: { session: '45-1', code: 'S321', other: true } },
+    { language: 'de' },
+    { language: 'FR' },
+    { language: '' },
   ])('rejects schema-invalid input %j', async (input) => {
     expect((await call(input)).structuredContent).toMatchObject({
       error: { code: JsonRpcErrorCode.InvalidParams },
@@ -703,6 +1004,78 @@ describe('canparl_search_speeches production contract', () => {
         offset = data.nextOffset as number;
       }
       expect(seen).toEqual(expected);
+    },
+  );
+  /** A House speech with short English and French text holding `marqueur` and `chars` letters. */
+  const longFrench = (id: number, chars: number) =>
+    speech(id, {
+      content: { en: '<p>short</p>', fr: `<p>marqueur ${'a'.repeat(chars)}</p>` },
+      politician_membership_url: `/politicians/memberships/${id + 1}/`,
+    });
+  it('measures the budget on the selected language, returning an oversized French speech whole', async () => {
+    memberships();
+    pages(http, [longFrench(0, 30_000), longFrench(1, 10)], { time__gte: '2026-10-19' });
+    const reply = await call({ dateFrom: '2026-10-19', language: 'fr', limit: 5 });
+    const french = parity(reply, searchSpeechesTool);
+    expect(french).toMatchObject({
+      shown: 1,
+      scanned: 1,
+      nextOffset: 1,
+      exhausted: false,
+      truncated: true,
+      notice: `${SUBSTANTIVE} ${oversized}`,
+    });
+    expect(french.speeches).toMatchObject([{ id: '0', content: `marqueur ${'a'.repeat(30_000)}` }]);
+    expect(wireBytes(reply)).toBeGreaterThan(RESPONSE_BUDGET);
+    expect(await success({ limit: 5 })).toMatchObject({
+      shown: 2,
+      scanned: 2,
+      exhausted: true,
+      speeches: [{ content: 'short' }, { content: 'short' }],
+      notice: SUBSTANTIVE,
+    });
+  });
+  it.each([undefined, 'marqueur'])(
+    'returns every French match exactly once across budget pages with contains %s',
+    async (contains) => {
+      memberships();
+      const rows = Array.from({ length: 30 }, (_, i) =>
+        i % 5 === 1
+          ? speech(i, { document_url: '/committees/finance/1/' })
+          : i % 5 === 3
+            ? speech(i, { content: { en: '<p>marqueur in English only</p>' } })
+            : longFrench(i, 3_800),
+      );
+      pages(http, rows, { time__gte: '2026-10-19' });
+      const filters = contains ? { contains } : {};
+      // English measures its own short text: one page of ten (or the six English-only markers).
+      const english = await success({ limit: 10, ...filters });
+      expect(english).toMatchObject({
+        shown: contains ? 6 : 10,
+        notice: expect.not.stringContaining('budget'),
+      });
+      const expected = rows
+        .filter((_, i) => i % 5 !== 1 && (!contains || i % 5 !== 3))
+        .map((row) => row.source_id);
+      const seen: string[] = [];
+      /** Candidates without French text that the walk's notices disclosed. */
+      let disclosed = 0;
+      let offset = 0;
+      for (;;) {
+        const data = await success({ limit: 10, offset, language: 'fr', ...filters });
+        seen.push(...ids(data));
+        disclosed += Number(
+          / (\d+) scanned candidates? had no French text/.exec(data.notice as string)?.[1] ?? 0,
+        );
+        expect(data.nextOffset).toBe(data.exhausted ? null : offset + (data.scanned as number));
+        if (data.exhausted) break;
+        expect(data.notice).toContain(budgetNotice(ids(data).length));
+        offset = data.nextOffset as number;
+      }
+      expect(seen).toEqual(expected);
+      expect(seen.length).toBeGreaterThan(10);
+      // Each English-only row is disclosed once across the walk, even where a page rewinds.
+      expect(disclosed).toBe(contains ? 6 : 0);
     },
   );
   it('ends an oversized last candidate of a terminal page as exhausted', async () => {

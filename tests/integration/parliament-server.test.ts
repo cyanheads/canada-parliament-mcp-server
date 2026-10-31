@@ -223,6 +223,62 @@ describe('actual parliament application over stdio', () => {
         $ref: '#/$defs/BillStage',
       });
     expect(JSON.stringify(billSchema).match(/"Complete official stage;/g)).toHaveLength(1);
+    interface InputNode {
+      anyOf?: InputNode[];
+      pattern?: string;
+      properties?: Record<string, InputNode>;
+      required?: string[];
+    }
+    const inputAt = (name: string, path: string[]) => {
+      let node = listing.tools.find((tool) => tool.name === name)!.inputSchema as InputNode;
+      for (const key of path) node = node.properties![key]!;
+      return node;
+    };
+    const patternAt = (name: string, path: string[]) => {
+      const node = inputAt(name, path);
+      return (node.anyOf?.find((branch) => 'pattern' in branch) ?? node).pattern;
+    };
+    const bill =
+      '(?:[Bb][Ii][Ll][Ll]\\s+)?[CcSs][-\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\u2010-\\u2015\\u2212]?[1-9][0-9]*[A-Za-z]?';
+    for (const [name, path, pattern] of [
+      ['canparl_search_votes', ['dateFrom'], '^\\s*(?:[0-9]{4}-[0-9]{2}-[0-9]{2}\\s*)?$'],
+      ['canparl_get_vote', ['personId'], '^\\s*(?:[0-9]+\\s*)?$'],
+      ['canparl_list_reference', ['session'], '^\\s*(?:[0-9]+-[0-9]+\\s*)?$'],
+      ['canparl_search_speeches', ['billDebated', 'session'], '^\\s*[0-9]+-[0-9]+\\s*$'],
+      ['canparl_get_member', ['votesBillCode'], `^\\s*(?:${bill}\\s*)?$`],
+      ['canparl_search_speeches', ['mentionedBill', 'code'], `^\\s*${bill}\\s*$`],
+      [
+        'canparl_get_bill',
+        ['section'],
+        '^\\s*(?:(?:sponsor|stages\\.house|stages\\.senate|stages\\.royalAssent|divisions|senateVoteDetails|publications|statute|summary\\.en|summary\\.fr|notes\\.en|notes\\.fr|milestones|webReferences)\\s*)?$',
+      ],
+      ['canparl_search_speeches', ['politician'], undefined],
+    ] as const)
+      expect(patternAt(name, [...path]), `${name} ${path.join('.')}`).toBe(pattern);
+    for (const scope of ['billDebated', 'mentionedBill'])
+      expect(inputAt('canparl_search_speeches', [scope]).required).toEqual(['session', 'code']);
+    const emptyScope = await call('canparl_search_speeches', { billDebated: {} });
+    expect(emptyScope.structuredContent).toMatchObject({
+      error: { code: -32602, data: { reason: 'invalid_arguments' } },
+    });
+    for (const path of ['billDebated.session', 'billDebated.code'])
+      expect(text(emptyScope)).toContain(path);
+    const yesterday = await call('canparl_search_speeches', { dateFrom: 'yesterday' });
+    expect(yesterday.structuredContent).toMatchObject({ error: { code: -32602 } });
+    expect(text(yesterday)).toContain(
+      'dateFrom: Expected a real calendar date written YYYY-MM-DD.',
+    );
+    expect(JSON.stringify(yesterday)).not.toContain('yesterday');
+    const section = await call('canparl_get_bill', { billCode: 'C-901', section: 'notes.de' });
+    expect(section.structuredContent).toMatchObject({ error: { code: -32602 } });
+    expect(text(section)).toContain(
+      'section: Unknown section. Available sections: sponsor, stages.house, stages.senate, stages.royalAssent, divisions, senateVoteDetails, publications, statute, summary.en, summary.fr, notes.en, notes.fr, milestones, webReferences.',
+    );
+    // An integer sent for the patterned personId is repaired to its decimal string and reaches the handler.
+    const repaired = await call('canparl_get_member', { personId: 58733, slug: 'river-example' });
+    expect(repaired.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_member_identifier' } },
+    });
     for (const summary of [
       billSchema.properties.bill!,
       outputOf('canparl_search_bills').properties.bills!.items,

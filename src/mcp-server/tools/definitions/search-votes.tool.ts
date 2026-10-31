@@ -2,7 +2,9 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  BILL_CODE_FORMAT,
   clampCount,
+  DATE_FORMAT,
   filterFailure,
   includesText,
   normalizeBillCode,
@@ -25,6 +27,7 @@ import {
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
+  optionalFormat,
   PaginationSchema,
   SessionInputSchema,
   SourceSchema,
@@ -82,7 +85,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
   inputAliases: { query: 'subjectContains' },
   input: z.object({
     session: SessionInputSchema,
-    billCode: OptionalStringSchema.describe(
+    billCode: optionalFormat(BILL_CODE_FORMAT).describe(
       'Exact bill code, including a split-bill suffix letter such as C-15A; accepts bill s321, S321, S 321, or S-321.',
     ),
     result: OptionalStringSchema.describe(
@@ -91,14 +94,14 @@ export const searchVotesTool = tool('canparl_search_votes', {
     documentType: OptionalStringSchema.describe(
       'Official category from canparl_list_reference topic vote_document_types.',
     ),
-    dateFrom: OptionalStringSchema.describe(
+    dateFrom: optionalFormat(DATE_FORMAT).describe(
       'Inclusive Ottawa civil date YYYY-MM-DD; independently optional.',
     ),
-    dateTo: OptionalStringSchema.describe(
+    dateTo: optionalFormat(DATE_FORMAT).describe(
       'Inclusive Ottawa civil date YYYY-MM-DD; independently optional.',
     ),
     subjectContains: OptionalStringSchema.describe(
-      'Literal Unicode-normalized case-insensitive subject substring.',
+      'Literal subject substring; matching ignores case, accents, dash and quote styles, and repeated whitespace.',
     ),
     limit: LimitSchema.describe(
       'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
@@ -120,7 +123,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
     {
       reason: 'unsupported_vote_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Session malformed or absent from the official division picker.',
+      when: 'Session with a zero or out-of-range number, or absent from the official division picker.',
       recovery:
         'Call canparl_list_reference with topic sessions and choose a session supporting House divisions.',
       retryable: false,
@@ -129,15 +132,15 @@ export const searchVotesTool = tool('canparl_search_votes', {
     {
       reason: 'invalid_vote_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Bill code, result, or document category is unrecognized.',
+      when: 'Result or document category is unrecognized.',
       recovery:
-        'Retry canparl_search_votes with a value or bill-code shape the error names; canparl_list_reference topics vote_results and vote_document_types list results and categories.',
+        'Retry canparl_search_votes with a value the error names; canparl_list_reference topics vote_results and vote_document_types list results and categories.',
       retryable: false,
     },
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A date is invalid or the bounds are reversed.',
+      when: 'A date names no calendar day, or the bounds are reversed.',
       recovery:
         'Retry canparl_search_votes with real YYYY-MM-DD dates and dateFrom no later than dateTo.',
       retryable: false,

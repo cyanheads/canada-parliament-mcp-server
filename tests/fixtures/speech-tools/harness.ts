@@ -1,4 +1,5 @@
 /** @fileoverview Synthetic speech HTTP boundary and CommonMark contract oracle. @module tests/fixtures/speech-tools/harness */
+import { readFileSync } from 'node:fs';
 import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { expect, vi } from 'vitest';
 import {
@@ -28,6 +29,15 @@ export const speech = (id = 1, extra: Record<string, unknown> = {}) => ({
   },
   ...extra,
 });
+/**
+ * Captured OpenParliament `/speeches/` rows, verbatim: both languages (Sgro 2025), no French at all
+ * (1994, blank `source_id`), French text without French headings or attribution (2009), a blank
+ * French heading (2015), and a procedural row with blank attribution (2026); plus Sgro's membership.
+ */
+export const hansard = (): Record<
+  'sgro' | 'sgroMembership' | 'duhamel1994' | 'someMembers2009' | 'strahl2015' | 'procedural2026',
+  Record<string, unknown>
+> => JSON.parse(readFileSync(new URL('./hansard-rows.json', import.meta.url), 'utf8'));
 export const membership = (extra: Record<string, unknown> = {}) => ({
   url: member,
   politician_url: actor,

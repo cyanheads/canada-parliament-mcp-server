@@ -3,6 +3,7 @@
  * @module domain/schemas
  */
 import { z } from '@cyanheads/mcp-ts-core';
+import { type InputFormat, SESSION_FORMAT } from './normalization.js';
 
 const blankToUndefined = (value: unknown) =>
   typeof value === 'string' ? value.trim() || undefined : value;
@@ -10,6 +11,39 @@ const blankToUndefined = (value: unknown) =>
 export const OptionalStringSchema = z
   .preprocess(blankToUndefined, z.string().optional())
   .describe('Optional trimmed text; blank means unset.');
+/**
+ * `^\s*(?:X\s*)?$`: blank, or the format with surrounding whitespace. `\s` is exactly the set
+ * `String.prototype.trim` removes, so the pattern admits what the trimming preprocess accepts.
+ */
+const optionalPattern = (format: InputFormat) => new RegExp(`^\\s*(?:${format.source}\\s*)?$`);
+/** `^\s*X\s*$`: the format with surrounding whitespace, which its normalizer trims. */
+const requiredPattern = (format: InputFormat) => new RegExp(`^\\s*${format.source}\\s*$`);
+/**
+ * Optional input in `format`, trimmed, with a blank meaning unset. The advertised pattern admits
+ * exactly the blank and padded values the field accepts, and refuses any other value in time linear
+ * in its length; a refusal carries the format's expectation, never the value.
+ */
+export function optionalFormat(format: InputFormat) {
+  return z.preprocess(
+    blankToUndefined,
+    z.string().regex(optionalPattern(format), format.expectation).optional(),
+  );
+}
+/**
+ * Required input in `format`, surrounding whitespace allowed; refuses any other value in time
+ * linear in its length with the format's expectation, never the value.
+ */
+export function requiredFormat(format: InputFormat) {
+  return z.string().regex(requiredPattern(format), format.expectation);
+}
+const SessionNumbersSchema = z
+  .object({
+    parliament: z.number().int().positive().describe('Positive parliament number.'),
+    session: z.number().int().positive().describe('Positive session number.'),
+  })
+  .strict()
+  .describe('Parliament and session numbers.');
+const SESSION_TOKEN = 'Parliament-session token, such as 45-1.';
 /** Session input; services resolve an omitted value from the current official feed. */
 export const SessionInputSchema = z
   .preprocess(
@@ -18,19 +52,23 @@ export const SessionInputSchema = z
       .union([
         z
           .string()
-          .regex(/^\d+-\d+$/)
-          .describe('Parliament-session token, such as 45-1.'),
-        z
-          .object({
-            parliament: z.number().int().positive().describe('Positive parliament number.'),
-            session: z.number().int().positive().describe('Positive session number.'),
-          })
-          .strict()
-          .describe('Parliament and session numbers.'),
+          .regex(optionalPattern(SESSION_FORMAT), SESSION_FORMAT.expectation)
+          .describe(SESSION_TOKEN),
+        SessionNumbersSchema,
       ])
       .optional(),
   )
   .describe('Parliamentary session; omitted means current.');
+/** Session a caller must name, as a token or numbers; a blank token is refused, not unset. */
+export const RequiredSessionSchema = z
+  .union([
+    z
+      .string()
+      .regex(requiredPattern(SESSION_FORMAT), SESSION_FORMAT.expectation)
+      .describe(SESSION_TOKEN),
+    SessionNumbersSchema,
+  ])
+  .describe('Parliamentary session.');
 /** Accepted session representation before normalization. */
 export type SessionInput = z.infer<typeof SessionInputSchema>;
 /** Source identifiers are intentionally distinct from display labels. */

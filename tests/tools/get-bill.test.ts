@@ -24,7 +24,7 @@ import {
   trailerFields,
   wireBytes,
 } from '../fixtures/bill-tools/harness.js';
-import { assertFilterRejection } from '../fixtures/filter-rejection.js';
+import { assertArgumentRejection, assertFilterRejection } from '../fixtures/filter-rejection.js';
 
 const sectionNames = [
   'sponsor',
@@ -396,9 +396,6 @@ describe('canparl_get_bill production contract', () => {
     expect(wireBytes(reply)).toBeLessThanOrEqual(24_000);
   });
   it.each([
-    { section: 'missing' },
-    { section: 'summary' },
-    { section: 'notes.de' },
     { offset: 1 },
     { limit: 150 },
     { section: 'sponsor', offset: 1 },
@@ -418,14 +415,34 @@ describe('canparl_get_bill production contract', () => {
       JsonRpcErrorCode.ValidationError,
       'Choose an available section from the outline and use offset and limit only for collections.',
     );
-    const unknown = `Unknown section. Available sections: ${sectionNames.join(', ')}.`;
-    if ('offset' in selection || 'limit' in selection)
-      expect(JSON.stringify(reply)).not.toContain('Available sections');
-    else {
-      expect(reply.structuredContent).toMatchObject({ error: { message: unknown } });
-      expect(JSON.stringify(reply.content)).toContain(unknown);
-    }
+    expect(JSON.stringify(reply)).not.toContain('Available sections');
   });
+  it.each([
+    ['missing', 'missing'],
+    ['summary', ''],
+    ['notes.de', 'notes.de'],
+    ['Sponsor', 'Sponsor'],
+  ])('rejects section %j by its advertised selectors before HTTP', async (section, rejected) => {
+    const reply = await call({ session: '45-1', billCode: 'C-901', section });
+    assertArgumentRejection(reply, {
+      lines: [`section: Unknown section. Available sections: ${sectionNames.join(', ')}.`],
+      rejected,
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+  it.each([' sponsor ', '', '   '])(
+    'reads section %j as its trimmed selector or unset',
+    async (section) => {
+      http.route({ match: detail(), respond: Response.json([rawBill()]) });
+      const reply = await call({ session: '45-1', billCode: 'C-901', section });
+      expect(reply.isError).not.toBe(true);
+      expect(reply.structuredContent).toMatchObject(
+        section.trim()
+          ? { kind: 'section', pagination: { section: 'sponsor' } }
+          : { bill: { billCode: 'C-901' } },
+      );
+    },
+  );
   it.each([{ offset: -1 }, { limit: 0 }, { limit: 10_001 }])(
     'rejects invalid page %j before HTTP',
     async (page) => {
@@ -579,12 +596,12 @@ describe('canparl_get_bill production contract', () => {
         fr: null,
       },
       milestones: {
-        houseFirstReading: '2026-01-01T15:12:48.157Z',
+        houseFirstReading: '2026-01-01T20:12:48.157Z',
         houseSecondReading: null,
         houseThirdReading: null,
         senateFirstReading: null,
         senateSecondReading: null,
-        senateThirdReading: '2026-01-02T00:00:00Z',
+        senateThirdReading: '2026-01-02T05:00:00Z',
       },
       webReferences: [
         {
@@ -618,7 +635,7 @@ describe('canparl_get_bill production contract', () => {
       appliedFilters: { session: '45-1', billCode: 'C-901' },
     });
   });
-  it('reports a dossier royal assent UTC clock with its Z designator', async () => {
+  it('reports a dossier royal assent Ottawa clock as its UTC instant', async () => {
     http.route({
       match: detail(),
       respond: Response.json([
@@ -626,7 +643,7 @@ describe('canparl_get_bill production contract', () => {
       ]),
     });
     const result = check(await call({ session: '45-1', billCode: 'C-901', section: 'statute' }));
-    expect(result.bill.royalAssentDate).toBe('2026-03-26T10:50:00Z');
+    expect(result.bill.royalAssentDate).toBe('2026-03-26T14:50:00Z');
   });
   it('starts a notes block that follows inline text on a new paragraph on both surfaces', async () => {
     http.route({
@@ -644,6 +661,23 @@ describe('canparl_get_bill production contract', () => {
       en: 'On December 14, 2021, the Senate adopted the following motion:\n\nThat, notwithstanding any provisions of the Rules:\n\n',
       fr: 'Le Sénat a adopté la motion suivante le 14 décembre 2021 : \n\nQue, nonobstant toute disposition du Règlement :\n\n',
     });
+  });
+  it('joins summary table cells with " | ", one row per paragraph, on both surfaces', async () => {
+    http.route({
+      match: detail(),
+      respond: Response.json([
+        rawBill('C-901', {
+          ShortLegislativeSummaryEn:
+            '<div>Totals:<table><tr><th>Year</th><th>Amount</th></tr><tr><td>2025</td><td>100</td></tr></table></div>',
+        }),
+      ]),
+    });
+    const result = await call({ session: '45-1', billCode: 'C-901', section: 'summary.en' });
+    expect(check(result).summary).toEqual({ en: 'Totals:\n\nYear | Amount\n\n2025 | 100\n\n' });
+    const body = result.content[0];
+    expect(body?.type === 'text' ? body.text : '').toContain(
+      'en: Totals:&#10;&#10;Year | Amount&#10;&#10;2025 | 100&#10;&#10;',
+    );
   });
   it('retains nulls for a sparse historical dossier and reports limited coverage', async () => {
     http.route({
@@ -733,23 +767,21 @@ describe('canparl_get_bill production contract', () => {
     expect(http.calls.map((c) => c.request.url)).toContain(current);
   });
   it.each(['C-0', 'C-1/S-1', '', 'https://evil.test/C-1', 'C - 901', 'C-0901', 'C-15AB', 'C-15A1'])(
-    'returns invalid-code recovery before HTTP for %s',
+    'rejects billCode %j by its advertised format before HTTP',
     async (billCode) => {
       const result = await call({ session: '45-1', billCode });
-      assertError(
-        result,
-        'invalid_bill_code',
-        JsonRpcErrorCode.ValidationError,
-        'Call canparl_search_bills by title and copy the returned billCode and session.',
-      );
-      assertFilterRejection(result, {
-        field: 'billCode',
+      assertArgumentRejection(result, {
+        lines: [
+          'billCode: Expected a House or Senate bill code such as C-15, C-15A, or S-1001: C or S, an optional single dash or space, a number without leading zeros, then an optional suffix letter.',
+        ],
         rejected: billCode,
-        shape: 'Expected a House or Senate bill code such as C-15',
       });
       expect(http.calls).toHaveLength(0);
     },
   );
+  it('declares no reason for a bill-code shape the schema refuses', () => {
+    expect(getBillTool.errors?.map(({ reason }) => reason)).not.toContain('invalid_bill_code');
+  });
   it.each(['C 901', 'c–901', 'Bill C 901'])(
     'reads the canonical dossier for separator variant %j',
     async (billCode) => {
@@ -918,6 +950,11 @@ describe('canparl_get_bill production contract', () => {
     const { parsed, ...bill } = routeReal('45-1-c-15');
     const page = check(await call({ ...bill, section: 'milestones' }));
     expect(page.milestones).toEqual(parsed.milestones);
+    expect(page.milestones).toMatchObject({
+      houseFirstReading: '2025-11-18T20:12:48.157Z',
+      houseThirdReading: '2026-02-26T21:29:18.793Z',
+    });
+    expect(page.bill.royalAssentDate).toBe('2026-03-26T14:50:00Z');
     expect(page).toMatchObject({ totalCount: null, pagination: { total: null, nextOffset: null } });
     expect(page.disclosure).toBeUndefined();
   });
@@ -976,21 +1013,33 @@ describe('canparl_get_bill production contract', () => {
     const references = check(await call({ ...bill, section: 'webReferences' }));
     expect(references).toMatchObject({ webReferences: [], disclosure: 'Section has no records.' });
   });
-  it('states the published fractional-second date-time shape for assent and milestones', () => {
+  it('states the Ottawa source clock and UTC shape for assent and milestones', () => {
     expect(BillSummarySchema.shape.royalAssentDate.description).toBe(
-      'Royal assent as a UTC instant ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z), or null; a value in another shape is relayed as published.',
+      "Royal assent as a UTC instant ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z), converted from LEGISinfo's Ottawa-time clock, or null; the time of day is LEGISinfo's recorded time, which can differ from when assent was signified. A value in another shape is relayed as published.",
     );
     expect(getBillTool.output.shape.milestones.unwrap().description).toBe(
-      'Reading milestones as UTC instants ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z); a value in another shape is relayed as published. Royal assent is bill.royalAssentDate.',
+      "Reading milestones as UTC instants ending in Z (YYYY-MM-DDTHH:MM:SS[.fraction]Z), converted from LEGISinfo's Ottawa-time clocks; Senate times of day are LEGISinfo's recorded times. A value in another shape is relayed as published. Royal assent is bill.royalAssentDate.",
     );
   });
-  it('describes division date-times as the LEGISinfo sitting date-time', () => {
+  it('describes division and stage date-times as Ottawa time without an offset', () => {
     const divisions = getBillTool.output.shape.divisions.unwrap().unwrap().element;
-    expect(divisions.shape.dateTime.description).toContain('LEGISinfo sitting date-time');
+    expect(divisions.shape.dateTime.description).toContain(
+      'LEGISinfo sitting date-time in Ottawa time as published, without an offset',
+    );
+    const stage = getBillTool.output.shape.stages.unwrap().shape.house.unwrap().unwrap().element;
+    for (const description of [
+      stage.shape.stateAsOf.description,
+      stage.shape.sittings.unwrap().element.shape.date.description,
+      stage.shape.committeeMeetings.unwrap().element.shape.date.description,
+      stage.shape.decisions.description,
+      stage.shape.significantEvents.description,
+      stage.shape.endOfStageEvent.description,
+    ])
+      expect(description).toContain('Ottawa time as published, without an offset');
   });
-  it('declares unknown_session for malformed and unsupported sessions alike', () => {
+  it('declares unknown_session for impossible and unlisted sessions alike', () => {
     expect(getBillTool.errors?.find(({ reason }) => reason === 'unknown_session')?.when).toBe(
-      'Malformed or unsupported official bill session.',
+      'Session with a zero or out-of-range number, or absent from the official bill session index.',
     );
   });
 });

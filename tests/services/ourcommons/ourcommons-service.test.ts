@@ -4,7 +4,12 @@ import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type CallBudget, createRequestContext } from '@/domain/request-context.js';
 import { OurCommonsService } from '@/services/ourcommons/ourcommons-service.js';
-import { realMemberVotes } from '../../fixtures/member-tools/harness.js';
+import {
+  parliamentRosterUrl,
+  realMemberVotes,
+  realRoster,
+  rosterPicker,
+} from '../../fixtures/member-tools/harness.js';
 
 const base = 'https://www.ourcommons.ca/Members/en';
 const picker = `${base}/votes`;
@@ -257,6 +262,136 @@ describe('OurCommonsService network boundary', () => {
       );
       expect(http.calls).toHaveLength(2);
     });
+  });
+  describe('Parliament rosters', () => {
+    const offered = ['45', '44', '43', '42', '41', '40', '39', '38', '37', '36'];
+    const picked = () =>
+      http.route({ match: rosterPicker, respond: () => new Response(realRoster('picker')) });
+    const urls = () => http.calls.map((call) => call.request.url);
+    it('verifies the Parliament on the roster picker, then reads that roster', async () => {
+      picked();
+      http.route({
+        match: parliamentRosterUrl(38),
+        respond: () => new Response(realRoster('p38')),
+      });
+      const result = await settle(service.listParliamentMembers(38, budget));
+      expect(result.data).toHaveLength(7);
+      expect(result.data.find((row) => row.personId === '25458')).toMatchObject({
+        name: 'Belinda Stronach',
+        party: 'Liberal',
+        from: '2004-06-28T00:00:00',
+        to: '2006-01-22T23:59:00',
+      });
+      expect(result.provenance.map((source) => source.url)).toEqual([
+        rosterPicker,
+        parliamentRosterUrl(38),
+      ]);
+      expect(urls()).toEqual([rosterPicker, parliamentRosterUrl(38)]);
+      for (const { request } of http.calls)
+        expect(request.headers.get('accept')).toBe(
+          request.url === rosterPicker ? 'text/html' : 'application/xml',
+        );
+    });
+    it('rejects a Parliament the picker does not offer, listing the offered ones, before any roster request', async () => {
+      picked();
+      const outcome = settle(service.listParliamentMembers(35, budget));
+      await expect(outcome).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: `parliament: Expected a Parliament the official House roster offers: ${offered.map((value) => `"${value}"`).join(', ')}.`,
+        data: { field: 'parliament', allowed: offered },
+      });
+      expect(urls()).toEqual([rosterPicker]);
+    });
+    it('keeps the picker six hours and each roster five minutes under its own URL', async () => {
+      picked();
+      for (const parliament of [38, 41] as const)
+        http.route({
+          match: parliamentRosterUrl(parliament),
+          respond: () => new Response(realRoster(`p${parliament}`)),
+        });
+      http.route({ match: roster, respond: () => new Response(realRoster('current')) });
+      await settle(service.listParliamentMembers(38, budget));
+      const p41 = await settle(service.listParliamentMembers(41, budget));
+      const current = await settle(service.listMembers(budget));
+      expect(p41.data.map((row) => row.personId)).toContain('58733');
+      expect(current.data.map((row) => row.personId)).toEqual(['89156', '72029']);
+      expect(p41.provenance.map((source) => source.cached)).toEqual([true, false]);
+      budget.dispose();
+      await vi.advanceTimersByTimeAsync(300_001);
+      budget = createRequestContext(createMockContext());
+      const again = await settle(service.listParliamentMembers(38, budget));
+      expect(again.provenance.map((source) => source.cached)).toEqual([true, false]);
+      expect(urls()).toEqual([
+        rosterPicker,
+        parliamentRosterUrl(38),
+        parliamentRosterUrl(41),
+        roster,
+        parliamentRosterUrl(38),
+      ]);
+    });
+    it('reads every Parliament from a literal p=* without the picker', async () => {
+      http.route({
+        match: 'https://www.ourcommons.ca/Members/en/search/xml?p=*',
+        respond: () => new Response(realRoster('all')),
+      });
+      const result = await settle(service.listAllMembers(budget));
+      expect(result.data.find((row) => row.personId === '1463')).toMatchObject({
+        name: 'Jim Abbott',
+        riding: 'Kootenay—Columbia',
+        party: 'Conservative',
+        from: '2008-10-14T00:00:00',
+        to: '2011-05-01T23:59:59',
+      });
+      expect(urls()).toEqual(['https://www.ourcommons.ca/Members/en/search/xml?p=*']);
+    });
+    it.each([
+      ['Parliament', () => service.listParliamentMembers(41, budget), parliamentRosterUrl(41)],
+      ['all-Parliaments', () => service.listAllMembers(budget), parliamentRosterUrl('*')],
+    ] as const)(
+      'fails an empty %s roster as retried unavailable data, never zero members, and caches nothing',
+      async (_name, read, url) => {
+        picked();
+        const empty = { match: url, once: true, respond: () => new Response(realRoster('empty')) };
+        http.route(
+          empty,
+          { ...empty },
+          { ...empty },
+          {
+            match: url,
+            respond: () => new Response(realRoster(url.endsWith('*') ? 'all' : 'p41')),
+          },
+        );
+        await expect(settle(read())).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { reason: 'roster_unavailable', retryable: true },
+        });
+        expect(urls().filter((entry) => entry === url)).toHaveLength(3);
+        expect((await settle(read())).data.length).toBeGreaterThan(0);
+        expect(urls().filter((entry) => entry === url)).toHaveLength(4);
+      },
+    );
+    it.each([
+      ['the picker', 38, rosterPicker, [rosterPicker]],
+      ['a Parliament roster', 38, parliamentRosterUrl(38), [rosterPicker, parliamentRosterUrl(38)]],
+      ['the all-Parliaments roster', '*', parliamentRosterUrl('*'), [parliamentRosterUrl('*')]],
+    ] as const)(
+      'classifies a 403 from %s as upstream_blocked without retry',
+      async (_name, parliament, refused, requested) => {
+        http.route(
+          { match: refused, respond: new Response('<html>refusal</html>', { status: 403 }) },
+          { match: rosterPicker, respond: () => new Response(realRoster('picker')) },
+        );
+        const read =
+          parliament === '*'
+            ? service.listAllMembers(budget)
+            : service.listParliamentMembers(parliament, budget);
+        await expect(settle(read)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { reason: 'upstream_blocked', source: 'ourcommons', status: 403, retryable: false },
+        });
+        expect(urls()).toEqual(requested);
+      },
+    );
   });
   it('spaces distinct HTTP starts by at least 250ms', async () => {
     const starts: number[] = [];

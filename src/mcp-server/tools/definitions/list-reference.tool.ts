@@ -5,6 +5,8 @@ import {
   filterFailure,
   normalizeFilter,
   normalizeSession,
+  quoteValues,
+  rejectFilter,
   rejectSession,
   vocabularyKey,
 } from '@/domain/normalization.js';
@@ -77,9 +79,14 @@ const EntrySchema = z
 /** Discover canonical source-specific sessions and vocabulary without guessed coverage. */
 export const listReferenceTool = tool('canparl_list_reference', {
   description:
-    'List canonical session coverage and bill, division, and caucus vocabulary. Use source-specific terms when constructing filters. Omitted session means the verified current session for vocabulary. For topic sessions omit session; the entire global index is returned.',
+    "List canonical session coverage and bill, division, and caucus vocabulary. Use source-specific terms when constructing filters. Omitted session means the verified current session for vocabulary. For topic sessions omit session; the entire global index is returned. Topic parties covers the current session only: its entries come from the current House roster, so a past division's caucuses come from canparl_get_vote byParty.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-  input: z.object({ topic: TopicSchema, session: SessionInputSchema }),
+  input: z.object({
+    topic: TopicSchema,
+    session: SessionInputSchema.describe(
+      'Session for session-dependent vocabulary; omitted means current. Omit it for topic sessions; topic parties accepts only the current session.',
+    ),
+  }),
   output: z.object({
     topic: TopicSchema,
     session: z
@@ -119,7 +126,7 @@ export const listReferenceTool = tool('canparl_list_reference', {
     {
       reason: 'unknown_reference_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Session malformed or absent from the topic-relevant source index.',
+      when: 'Session with a zero or out-of-range number, or absent from the topic-relevant source index.',
       recovery:
         'Call canparl_list_reference with topic sessions and omit session to see supported choices.',
       retryable: false,
@@ -127,8 +134,9 @@ export const listReferenceTool = tool('canparl_list_reference', {
     {
       reason: 'incompatible_reference_session',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A session is supplied for the global sessions topic.',
-      recovery: 'Call canparl_list_reference with topic sessions and omit the session argument.',
+      when: 'A session is supplied for the global sessions topic, or a session other than the current one for the parties topic, whose entries describe the current House roster.',
+      recovery:
+        "Call canparl_list_reference again without session: topic sessions lists the whole index and topic parties covers the current session only; for a past division's caucuses read canparl_get_vote byParty.",
       retryable: false,
     },
     {
@@ -153,6 +161,18 @@ export const listReferenceTool = tool('canparl_list_reference', {
       const official = getLegisinfoService();
       const house = getOurCommonsService();
       const current = await official.getCurrentSession(request);
+      // Party entries come from the current roster, which cannot describe another session's caucuses.
+      if (input.topic === 'parties' && selected !== undefined && selected !== current.data)
+        throw ctx.fail(
+          'incompatible_reference_session',
+          ...filterFailure(
+            rejectFilter(
+              'session',
+              `Expected no session, or the current session ${quoteValues([current.data])}, for topic parties.`,
+              { allowed: [current.data] },
+            ),
+          ),
+        );
       const provenance = [...current.provenance];
       const session = input.topic === 'sessions' ? null : (selected ?? current.data);
       const entries: z.infer<typeof EntrySchema>[] = [];

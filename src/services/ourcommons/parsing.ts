@@ -8,6 +8,7 @@ import type {
   MemberVote,
   OurCommonsMember,
   RecordedBallot,
+  RosterMember,
   VoteParticipant,
   VoteSession,
 } from './types.js';
@@ -67,6 +68,11 @@ function text(row: RecordValue, key: string): string | null {
   }
   if (typeof value !== 'string') return malformed(key);
   return decode(value);
+}
+/** Optional text whose blank source value means no value. */
+function filled(row: RecordValue, key: string): string | null {
+  const value = text(row, key);
+  return value?.trim() ? value : null;
 }
 function required(row: RecordValue, key: string): string {
   const value = text(row, key);
@@ -190,20 +196,49 @@ export function parseVoteSessions(html: string): VoteSession[] {
   if (!sessions.length) return malformed('session picker');
   return unique(sessions, (row) => row.session);
 }
-/** Parse the complete current roster. */
-export function parseMembers(xml: string): OurCommonsMember[] {
+/**
+ * Parse the Members search page's Parliament picker (`data-input="p"`) into the Parliament numbers
+ * it offers, without the `*` (All) and `cr` (Current Members) choices.
+ */
+export function parseRosterParliaments(html: string): number[] {
+  // The live page uses HTML's --!> comment terminator, unsupported by linkedom.
+  const { document } = parseHTML(html.replace(/--!>/g, '-->'));
+  const parliaments = [...document.querySelectorAll('[data-input="p"][data-value]')].flatMap(
+    (element) => {
+      const value = element.getAttribute('data-value') ?? '';
+      if (value === '*' || value === 'cr') return [];
+      const parliament = Number(value);
+      if (!Number.isSafeInteger(parliament) || parliament < 1 || String(parliament) !== value)
+        return malformed('roster picker token');
+      return [parliament];
+    },
+  );
+  if (!parliaments.length) return malformed('roster picker');
+  return unique(parliaments, String);
+}
+/**
+ * Parse an official House roster: one row per person, a blank caucus or date read as none. A
+ * Parliament roster row carries the caucus and riding last held in that Parliament.
+ */
+export function parseRoster(xml: string): RosterMember[] {
   return unique(
-    records(xml, 'ArrayOfMemberOfParliament', 'MemberOfParliament').map((row) => {
-      const member = person(row);
-      return {
-        ...member,
-        current: true as const,
-        slug: null,
-        detailLookup: { personId: member.personId },
-      };
-    }),
+    records(xml, 'ArrayOfMemberOfParliament', 'MemberOfParliament').map((row) => ({
+      ...person(row),
+      party: filled(row, 'CaucusShortName'),
+      from: filled(row, 'FromDateTime'),
+      to: filled(row, 'ToDateTime'),
+    })),
     (row) => row.personId,
   );
+}
+/** Parse the complete current roster. */
+export function parseMembers(xml: string): OurCommonsMember[] {
+  return parseRoster(xml).map((member) => ({
+    ...member,
+    current: true as const,
+    slug: null,
+    detailLookup: { personId: member.personId },
+  }));
 }
 /** Parse and verify every division against the requested session. */
 export function parseVotes(xml: string, session: string): Division[] {

@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRequestContext } from '@/domain/request-context.js';
 import { getMemberTool } from '@/mcp-server/tools/definitions/get-member.tool.js';
 import { getOpenParliamentService } from '@/services/openparliament/index.js';
-import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
+import {
+  assertArgumentRejection,
+  assertFilterRejection,
+  type FilterRejection,
+} from '../fixtures/filter-rejection.js';
 import {
   actor,
   collection,
@@ -16,9 +20,11 @@ import {
   origin,
   page,
   parity,
+  parliamentRosterUrl,
   profile,
   rawPerson,
   realMemberVotes,
+  realRoster,
   rosterUrl,
   setup,
   teardown,
@@ -492,8 +498,6 @@ describe('canparl_get_member production contract', () => {
       { slug: 'river-example', personId: '1' },
       { field: 'slug|personId', rejected: 'river-example', shape: exactlyOne },
     ],
-    [{ personId: 'x' }, { field: 'personId', rejected: '', shape: 'Expected a decimal' }],
-    [{ personId: 'zzQ9' }, { field: 'personId', rejected: 'zzQ9', shape: 'Expected a decimal' }],
     [
       { slug: 'https://evil.test/politicians/river-example/' },
       {
@@ -512,8 +516,32 @@ describe('canparl_get_member production contract', () => {
     assertFilterRejection(result, expected);
     expect(http.calls).toHaveLength(0);
   });
+  it.each<[Record<string, string>, string]>([
+    [{ personId: 'x' }, ''],
+    [{ personId: 'zzQ9' }, 'zzQ9'],
+    [{ personId: '58 733' }, '58 733'],
+  ])('rejects %j by its advertised personId format before any request', async (input, rejected) => {
+    assertArgumentRejection(await call(input), {
+      lines: [
+        'personId: Expected a decimal official person ID, as in a canparl_search_members detailLookup or a canparl_get_vote ballot row.',
+      ],
+      rejected,
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+  it('reads an integer personId as its decimal string', async () => {
+    roster();
+    candidates([{ name: 'River Example', url: actor }]);
+    json(http, actor, profile());
+    const data = parity(await call({ personId: 1, ...disabled }), getMemberTool);
+    expect(data).toMatchObject({
+      member: { personId: '1', slug: 'river-example' },
+      appliedFilters: { personId: '1', slug: null },
+    });
+  });
   it('returns historical lookup recovery for an unknown official ID', async () => {
     roster([]);
+    http.route({ match: parliamentRosterUrl('*'), respond: new Response(realRoster('all')) });
     failure(await call({ personId: '9' }), getMemberTool.errors![1]!);
   });
   it('retains a slug profile while roster currentness is unavailable', async () => {
@@ -1286,26 +1314,34 @@ describe('canparl_get_member production contract', () => {
         votePicker,
       ]);
     });
-    it.each<[Record<string, unknown>, string, FilterRejection]>([
+    it('rejects an impossible votesSession before any request', async () => {
+      const result = await call({ personId: '2897', votesSession: '45-0' });
+      failure(result, reason('unsupported_vote_session'));
+      assertFilterRejection(result, {
+        field: 'votesSession',
+        rejected: '',
+        shape: 'Expected a parliament-session token',
+      });
+      expect(http.calls).toHaveLength(0);
+    });
+    it.each<[Record<string, string>, string]>([
       [
-        { votesSession: '45-0' },
-        'unsupported_vote_session',
-        { field: 'votesSession', rejected: '', shape: 'Expected a parliament-session token' },
+        { votesSession: '45/1' },
+        'votesSession: Expected a parliament-session token such as 45-1, with positive parliament and session numbers.',
       ],
       [
         { votesBillCode: 'C-015' },
-        'invalid_vote_filter',
-        {
-          field: 'votesBillCode',
-          rejected: 'C-015',
-          shape: 'Expected a House or Senate bill code',
-        },
+        'votesBillCode: Expected a House or Senate bill code such as C-15, C-15A, or S-1001: C or S, an optional single dash or space, a number without leading zeros, then an optional suffix letter.',
       ],
-    ])('rejects malformed %j before any request', async (input, name, expected) => {
+    ])('rejects %j by its advertised format before any request', async (input, line) => {
       const result = await call({ personId: '2897', ...input });
-      failure(result, reason(name));
-      assertFilterRejection(result, expected);
+      assertArgumentRejection(result, { lines: [line], rejected: Object.values(input)[0] ?? '' });
       expect(http.calls).toHaveLength(0);
+    });
+    it('declares no reason for a votesBillCode shape the schema refuses', () => {
+      expect(getMemberTool.errors?.map((entry) => entry.reason)).not.toContain(
+        'invalid_vote_filter',
+      );
     });
     it("reads a former member's latest session through a slug with one parl_mp_id", async () => {
       json(http, actor, profile({ other_info: { parl_mp_id: ['35933'] }, image: null }));
@@ -1313,7 +1349,14 @@ describe('canparl_get_member production contract', () => {
       memberVotes('35933', realMemberVotes('35933-latest'));
       const data = parity(await call({ slug: actor, sponsoredBills: 0 }), getMemberTool);
       expect(data).toMatchObject({
-        member: { personId: '35933', slug: 'river-example', current: false },
+        // The slug path reads no all-Parliaments row, so it has no official membership span.
+        member: {
+          personId: '35933',
+          slug: 'river-example',
+          current: false,
+          from: null,
+          to: null,
+        },
         appliedFilters: { slug: 'river-example', personId: null, votesSession: '41-2' },
         unavailable: [],
       });
@@ -1445,5 +1488,182 @@ describe('canparl_get_member production contract', () => {
         expect(http.calls.map((c) => c.request.url)).toEqual([`${origin}${actor}`, rosterUrl]);
       },
     );
+  });
+  describe('former members by official personId', () => {
+    const everyone = parliamentRosterUrl('*');
+    const urls = () => http.calls.map((c) => c.request.url);
+    /** Real current roster (72029, 89156) and all-Parliaments roster (adds 1463, 35933, 58733, 192, 71341). */
+    const rosters = () =>
+      http.route(
+        { match: rosterUrl, respond: () => new Response(realRoster('current')) },
+        { match: everyone, respond: () => new Response(realRoster('all')) },
+      );
+    const named = (name: string, rows: unknown[]) =>
+      page(http, '/politicians/', { limit: 4, offset: 0, include: 'all', name }, rows);
+    it('resolves a former personId on the all-Parliaments roster with official ballots and no guessed slug', async () => {
+      rosters();
+      const abbott = '/politicians/jim-abbott/';
+      const namePage = named('Jim Abbott', [{ name: 'Jim Abbott', url: abbott }]);
+      // OpenParliament's jim-abbott profile publishes no parl_mp_id, so it cannot verify 1463.
+      json(
+        http,
+        abbott,
+        profile({ url: abbott, name: 'Jim Abbott', other_info: {}, memberships: [], image: null }),
+      );
+      http.route({
+        match: votePicker,
+        respond: () =>
+          new Response(
+            ['45-1', '38-1']
+              .map((value) => `<a data-input="s" data-value="${value}">${value}</a>`)
+              .join(''),
+          ),
+      });
+      memberVotes('1463', realMemberVotes('1463-38-1'), '38-1');
+      const data = parity(
+        await call({ personId: '1463', votesSession: '38-1', sponsoredBills: 0 }),
+        getMemberTool,
+      );
+      expect(data).toMatchObject({
+        member: {
+          personId: '1463',
+          slug: null,
+          name: 'Jim Abbott',
+          party: 'Conservative',
+          riding: 'Kootenay—Columbia',
+          province: 'British Columbia',
+          current: false,
+          from: '2008-10-14T00:00:00',
+          to: '2011-05-01T23:59:59',
+          url: 'https://www.ourcommons.ca/Members/en/1463',
+          detailLookup: { personId: '1463' },
+        },
+        memberships: null,
+        openParliament: { status: 'unavailable', reason: 'enrichment_unavailable' },
+        recentVotes: { status: 'available', nextOffset: null, hasMore: false },
+        appliedFilters: { personId: '1463', slug: null, votesSession: '38-1' },
+        unavailable: [{ section: 'openParliament', failure: { reason: 'enrichment_unavailable' } }],
+      });
+      expect((data.recentVotes as { items: unknown[] }).items).toEqual([
+        {
+          session: '38-1',
+          number: 190,
+          date: '2005-11-28',
+          subject: 'Opposition Motion (Confidence in the Government)',
+          ballot: 'Yes',
+          url: 'https://www.ourcommons.ca/Members/en/votes/38/1/190',
+          source: 'ourcommons',
+          officialBallot: 'Yea',
+          billCode: null,
+          result: 'Agreed To',
+        },
+        expect.objectContaining({ number: 189, officialBallot: 'Yea' }),
+        expect.objectContaining({ number: 188, ballot: 'No', officialBallot: 'Nay' }),
+      ]);
+      expect(urls()).toEqual([
+        rosterUrl,
+        everyone,
+        namePage,
+        `${origin}${abbott}`,
+        votePicker,
+        memberVotesUrl('1463', '38-1'),
+      ]);
+    });
+    it('verifies a former member through the unchanged crosswalk', async () => {
+      rosters();
+      const cannan = '/politicians/ron-cannan/';
+      const namePage = named('Ron Cannan', [{ name: 'Ron Cannan', url: cannan }]);
+      json(
+        http,
+        cannan,
+        profile({
+          url: cannan,
+          name: 'Ron Cannan',
+          other_info: { parl_mp_id: ['35933'] },
+          memberships: [],
+          image: null,
+        }),
+      );
+      memberVotes('35933', realMemberVotes('35933-latest'));
+      const data = parity(await call({ personId: '35933', sponsoredBills: 0 }), getMemberTool);
+      expect(data).toMatchObject({
+        member: {
+          personId: '35933',
+          slug: 'ron-cannan',
+          name: 'Ron Cannan',
+          riding: 'Kelowna—Lake Country',
+          current: false,
+          from: '2011-05-02T00:00:00',
+          to: '2015-10-18T23:59:59',
+          detailLookup: { personId: '35933' },
+        },
+        openParliament: { status: 'available', reason: null },
+        appliedFilters: { personId: '35933', votesSession: '41-2' },
+        unavailable: [],
+      });
+      expect(
+        (data.recentVotes as { items: { number: number }[] }).items.map((row) => row.number),
+      ).toEqual([467, 466, 465]);
+      expect(urls()).toEqual([
+        rosterUrl,
+        everyone,
+        namePage,
+        `${origin}${cannan}`,
+        memberVotesUrl('35933'),
+      ]);
+    });
+    it('keeps member_not_found for a personId in neither roster, after reading both', async () => {
+      rosters();
+      failure(await call({ personId: '99' }), getMemberTool.errors![1]!);
+      expect(urls()).toEqual([rosterUrl, everyone]);
+    });
+    it('reads a current personId from the current roster alone, with its sitting membership span', async () => {
+      rosters();
+      const namePage = named('Dan Albas', []);
+      const surname = page(
+        http,
+        '/politicians/',
+        { limit: 4, offset: 0, include: 'all', family_name: 'Albas' },
+        [],
+      );
+      const data = parity(await call({ personId: '72029', ...disabled }), getMemberTool);
+      expect(data).toMatchObject({
+        member: {
+          personId: '72029',
+          current: true,
+          riding: 'Okanagan Lake West—South Kelowna',
+          from: '2025-04-28T00:00:00',
+          to: null,
+        },
+      });
+      expect(urls()).toEqual([rosterUrl, namePage, surname]);
+    });
+    it('keeps a digit-only slug equal to a former personId as an OpenParliament ID', async () => {
+      rosters();
+      json(http, '/politicians/192/', numericProfile('192', { name: 'Unrelated Numeric' }));
+      const data = parity(await call({ slug: '192', ...disabled }), getMemberTool);
+      expect(data).toMatchObject({
+        member: { personId: null, slug: '192', name: 'Unrelated Numeric', current: null },
+        appliedFilters: { slug: '192', personId: null },
+      });
+      expect(urls()).toEqual([rosterUrl, `${origin}/politicians/192/`]);
+    });
+    it('fails an empty all-Parliaments roster as unavailable instead of member_not_found', async () => {
+      http.route(
+        { match: rosterUrl, respond: () => new Response(realRoster('current')) },
+        { match: everyone, respond: () => new Response(realRoster('empty')) },
+      );
+      const result = await call({ personId: '1463', ...disabled });
+      failure(
+        result,
+        getMemberTool.errors!.find((entry) => entry.reason === 'roster_unavailable')!,
+      );
+      expect(urls()).toEqual([rosterUrl, everyone, everyone, everyone]);
+    });
+    it('describes former personIds on the tool, the input, and member_not_found', () => {
+      expect(getMemberTool.description).toContain('official personId, current or former');
+      expect(getMemberTool.input.shape.personId.description).toContain('former member');
+      expect(getMemberTool.errors![1]!.when).toContain('all-Parliaments roster');
+    });
   });
 });

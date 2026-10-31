@@ -7,12 +7,14 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
-import { rejectFilter, rejectSession } from '@/domain/normalization.js';
+import { quoteValues, rejectFilter, rejectSession } from '@/domain/normalization.js';
 import type { RequestContext } from '@/domain/request-context.js';
 import type { Source, SourceResult } from '@/domain/schemas.js';
 import {
   parseMembers,
   parseMemberVotes,
+  parseRoster,
+  parseRosterParliaments,
   parseVoteParticipants,
   parseVoteSessions,
   parseVotes,
@@ -21,9 +23,24 @@ import type {
   Division,
   MemberVote,
   OurCommonsMember,
+  RosterMember,
   VoteParticipant,
   VoteSession,
 } from './types.js';
+
+/**
+ * A roster the picker offers, which the source answers with an empty 200 only when something is
+ * wrong upstream: an unknown `p` returns the same empty root, so emptiness never means no members.
+ */
+function populatedRoster(xml: string): RosterMember[] {
+  const rows = parseRoster(xml);
+  if (!rows.length)
+    throw serviceUnavailable('An official House roster the source offers came back empty.', {
+      reason: 'roster_unavailable',
+      retryable: true,
+    });
+  return rows;
+}
 
 interface CacheEntry {
   data: unknown;
@@ -138,6 +155,39 @@ export class OurCommonsService {
   /** Obtain the entire current roster without per-person network requests. */
   listMembers(request: RequestContext): Promise<SourceResult<OurCommonsMember[]>> {
     return this.load('/Members/en/search/xml', parseMembers, request);
+  }
+  /** Obtain the Parliaments the Members search picker offers; the roster ignores any other `p`. */
+  getRosterParliaments(request: RequestContext): Promise<SourceResult<number[]>> {
+    return this.load('/Members/en/search', parseRosterParliaments, request, 21_600_000, true);
+  }
+  /**
+   * Obtain everyone who sat in one Parliament, one row each with the caucus and riding last held
+   * there. A Parliament the picker does not offer is a `parliament` filter rejection listing the
+   * offered ones, before any roster request.
+   */
+  async listParliamentMembers(
+    parliament: number,
+    request: RequestContext,
+  ): Promise<SourceResult<RosterMember[]>> {
+    const picker = await this.getRosterParliaments(request);
+    if (!picker.data.includes(parliament)) {
+      const offered = picker.data.map(String);
+      throw rejectFilter(
+        'parliament',
+        `Expected a Parliament the official House roster offers: ${quoteValues(offered)}.`,
+        { allowed: offered },
+      );
+    }
+    const result = await this.load(
+      `/Members/en/search/xml?p=${parliament}`,
+      populatedRoster,
+      request,
+    );
+    return { data: result.data, provenance: [...picker.provenance, ...result.provenance] };
+  }
+  /** Obtain everyone in any offered Parliament, one row each from their latest Parliament. */
+  listAllMembers(request: RequestContext): Promise<SourceResult<RosterMember[]>> {
+    return this.load('/Members/en/search/xml?p=*', populatedRoster, request);
   }
   /** Verify a session against the divisions picker; a rejection names the caller's `field`. */
   private async verifySession(

@@ -1,0 +1,213 @@
+<form method="get" action="/Members/en/search">
+	<div class="ce-search-refiner input-group">
+						<input class="d-none" type="hidden" name="q" value="" />
+					<div class="dropdown">
+						<div class="refiner-root">
+							<input type="hidden" name="p" value="cr" onchange="sendForm()" />						<label for="p-button" id="p-label">Parliament</label>
+							<button class="btn btn-primary btn-refiner dropdown-toggle highlight" type="button" data-toggle="dropdown"
+									id="p-button" aria-haspopup="listbox" aria-expanded="false" role="combobox" aria-labelledby="p-label p-value" aria-controls="p-listbox">
+								<span id="p-value">Current Members</span>
+								<span class="caret"></span>
+							</button>
+							<ul class="dropdown-menu " aria-labelledby="p-label p-value" role="listbox" id="p-listbox">
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="*" data-input="p" class="dropdown-item   "
+											   href="#">
+												All
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="true"
+											   aria-disabled="false"
+											   data-value="cr" data-input="p" class="dropdown-item  active "
+											   href="#">
+												Current Members
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="45" data-input="p" class="dropdown-item   "
+											   href="#">
+												45th Parliament<br />(Monday, May 26, 2025 to present)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="44" data-input="p" class="dropdown-item   "
+											   href="#">
+												44th Parliament<br />(Monday, November 22, 2021 to Sunday, March 23, 2025)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="43" data-input="p" class="dropdown-item   "
+											   href="#">
+												43rd Parliament<br />(Thursday, December 5, 2019 to Sunday, August 15, 2021)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="42" data-input="p" class="dropdown-item   "
+											   href="#">
+												42nd Parliament<br />(Thursday, December 3, 2015 to Wednesday, September 11, 2019)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="41" data-input="p" class="dropdown-item   "
+											   href="#">
+												41st Parliament<br />(Thursday, June 2, 2011 to Sunday, August 2, 2015)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="40" data-input="p" class="dropdown-item   "
+											   href="#">
+												40th Parliament<br />(Tuesday, November 18, 2008 to Saturday, March 26, 2011)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="39" data-input="p" class="dropdown-item   "
+											   href="#">
+												39th Parliament<br />(Monday, April 3, 2006 to Sunday, September 7, 2008)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="38" data-input="p" class="dropdown-item   "
+											   href="#">
+												38th Parliament<br />(Monday, October 4, 2004 to Tuesday, November 29, 2005)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="37" data-input="p" class="dropdown-item   "
+											   href="#">
+												37th Parliament<br />(Monday, January 29, 2001 to Sunday, May 23, 2004)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="36" data-input="p" class="dropdown-item   "
+											   href="#">
+												36th Parliament<br />(Monday, September 22, 1997 to Sunday, October 22, 2000)
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+							</ul>
+						</div>
+					</div>
+					<div class="dropdown">
+						<div class="refiner-root">
+							<input type="hidden" name="pa" value="*" onchange="sendForm()" />						<label for="pa-button" id="pa-label">Political Affiliation</label>
+							<button class="btn btn-primary btn-refiner dropdown-toggle " type="button" data-toggle="dropdown"
+									id="pa-button" aria-haspopup="listbox" aria-expanded="false" role="combobox" aria-labelledby="pa-label pa-value" aria-controls="pa-listbox">
+								<span id="pa-value">All</span>
+								<span class="caret"></span>
+							</button>
+							<ul class="dropdown-menu " aria-labelledby="pa-label pa-value" role="listbox" id="pa-listbox">
+									<li role="none">
+											<a role="option"
+											   aria-selected="true"
+											   aria-disabled="false"
+											   data-value="*" data-input="pa" class="dropdown-item   "
+											   href="#">
+												All
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="6" data-input="pa" class="dropdown-item   with-count"
+											   href="#">
+												Bloc Québécois
+													<span class="text-right">21</span>
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="8781" data-input="pa" class="dropdown-item   with-count"
+											   href="#">
+												Conservative
+													<span class="text-right">137</span>
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="14130" data-input="pa" class="dropdown-item   with-count"
+											   href="#">
+												Green Party
+													<span class="text-right">1</span>
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="4" data-input="pa" class="dropdown-item   with-count"
+											   href="#">
+												Liberal
+													<span class="text-right">173</span>
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+									<li role="none">
+											<a role="option"
+											   aria-selected="false"
+											   aria-disabled="false"
+											   data-value="3" data-input="pa" class="dropdown-item   with-count"
+											   href="#">
+												NDP
+													<span class="text-right">5</span>
+											</a>
+									</li>
+									<li role="separator" aria-hidden="true" class="dropdown-divider"></li>
+							</ul>
+						</div>
+					</div>
+					</form>

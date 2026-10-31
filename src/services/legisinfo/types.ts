@@ -82,7 +82,10 @@ export interface WebReference {
   typeId: number | null;
   url: BilingualText;
 }
-/** Reading date-times as UTC instants; royal assent is `BillSummary.royalAssentDate`. */
+/**
+ * Reading date-times as the UTC instants of LEGISinfo's Ottawa wall clocks; royal assent is
+ * `BillSummary.royalAssentDate`.
+ */
 export interface BillMilestones {
   houseFirstReading: string | null;
   houseSecondReading: string | null;

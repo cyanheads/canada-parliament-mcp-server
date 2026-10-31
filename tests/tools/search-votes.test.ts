@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { VOTE_DOCUMENT_TYPES } from '@/domain/reference-catalog.js';
 import { searchVotesTool } from '@/mcp-server/tools/definitions/search-votes.tool.js';
 import { assertMeasuredResponse } from '../fixtures/bill-tools/harness.js';
-import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
+import {
+  type ArgumentRejection,
+  assertArgumentRejection,
+  assertFilterRejection,
+  type FilterRejection,
+} from '../fixtures/filter-rejection.js';
 import {
   current,
   failure,
@@ -121,6 +126,28 @@ describe('canparl_search_votes production contract', () => {
       pagination: { hasMore: false, nextOffset: null },
     });
   });
+  it('keeps the shared default of 25 rows', async () => {
+    votes(
+      http,
+      Array.from({ length: 30 }, (_, i) => rawVote(i + 1)),
+    );
+    const data = parity(await call({ session: '45-1' }), searchVotesTool);
+    expect(data).toMatchObject({ totalCount: 30, shown: 25, cap: 25, pagination: { limit: 25 } });
+  });
+  it('matches a subject typed with another dash and doubled spacing, returning it as published', async () => {
+    const subject = '2nd reading of Bill C-264, An Act to repeal certain restrictions on shipping';
+    votes(http, [...rows, rawVote(11, { DecisionDivisionSubject: subject })]);
+    const typed = 'bill c‑264,  an act';
+    const data = parity(await call({ session: '45-1', subjectContains: typed }), searchVotesTool);
+    expect(data).toMatchObject({
+      total: 1,
+      divisions: [{ number: 11, subject }],
+      appliedFilters: { subjectContains: typed },
+    });
+    expect(
+      parity(await call({ session: '45-1', subjectContains: 'ECOLE' }), searchVotesTool),
+    ).toMatchObject({ total: 4 });
+  });
   it.each([
     [{ result: 'Failed' }, [3]],
     [{ dateFrom: '2026-10-20' }, [3]],
@@ -207,9 +234,26 @@ describe('canparl_search_votes production contract', () => {
   );
   const bill = 'Expected a House or Senate bill code such as C-15';
   const date = 'Expected a real calendar date written YYYY-MM-DD';
+  it.each<[Record<string, string>, ArgumentRejection]>([
+    [{ billCode: 'C-0' }, { lines: [`billCode: ${bill}`], rejected: 'C-0' }],
+    [{ billCode: 'C - 2' }, { lines: [`billCode: ${bill}`], rejected: 'C - 2' }],
+    [{ dateFrom: 'yesterday' }, { lines: [`dateFrom: ${date}.`], rejected: 'yesterday' }],
+    [{ dateTo: '2026-1-01' }, { lines: [`dateTo: ${date}.`], rejected: '2026-1-01' }],
+    [
+      { session: '45/1' },
+      {
+        lines: [
+          'session: Expected a parliament-session token such as 45-1, with positive parliament and session numbers.',
+        ],
+        rejected: '45/1',
+      },
+    ],
+  ])('rejects %j by its advertised format before HTTP', async (input, expected) => {
+    votes(http, rows);
+    assertArgumentRejection(await call({ session: '45-1', ...input }), expected);
+    expect(http.calls).toHaveLength(0);
+  });
   it.each<[Record<string, string>, FilterRejection]>([
-    [{ billCode: 'C-0' }, { field: 'billCode', rejected: 'C-0', shape: bill }],
-    [{ billCode: 'C - 2' }, { field: 'billCode', rejected: 'C - 2', shape: bill }],
     [
       { result: 'Imaginary' },
       {

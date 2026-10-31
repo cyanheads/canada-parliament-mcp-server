@@ -1,23 +1,24 @@
 /**
- * @fileoverview Verified crosswalk from an official current personId to one OpenParliament profile,
- * shared by every tool input that accepts an OpenParliament slug.
+ * @fileoverview Verified crosswalk from an official personId's roster row to one OpenParliament
+ * profile, shared by `canparl_get_member` and every tool input that accepts an OpenParliament slug.
  * @module mcp-server/tools/definitions/_member-identity
  */
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { vocabularyKey } from '@/domain/normalization.js';
+import { PERSON_ID, stripAccents, vocabularyKey } from '@/domain/normalization.js';
 import type { RequestContext } from '@/domain/request-context.js';
 import type { Source } from '@/domain/schemas.js';
 import {
   getOpenParliamentService,
   type PoliticianProfile,
 } from '@/services/openparliament/index.js';
-import { getOurCommonsService, type OurCommonsMember } from '@/services/ourcommons/index.js';
-
-/** Decimal official personId; a digit-only slug input may be one. */
-export const PERSON_ID = /^\d+$/;
+import {
+  getOurCommonsService,
+  type OurCommonsMember,
+  type RosterMember,
+} from '@/services/ourcommons/index.js';
 
 function foldAccents(value: string): string {
-  return value.normalize('NFD').replace(/\p{M}/gu, '').normalize('NFC');
+  return stripAccents(value).normalize('NFC');
 }
 
 /** Only interior single-letter initials are optional; full given names remain distinct. */
@@ -37,10 +38,11 @@ function identityName(value: string): string {
  * name/profile matches take precedence. An empty exact name page permits surname and different
  * accent-folded surname pages. Every page and the union
  * must be complete with at most three unique candidates; source failures propagate. Never
- * requests `/politicians/{personId}/`.
+ * requests `/politicians/{personId}/`. The row is a current member's or, for a former member, the
+ * all-Parliaments roster row; the rules are the same.
  */
 export async function crosswalkProfile(
-  official: OurCommonsMember,
+  official: RosterMember,
   request: RequestContext,
   provenance: Source[],
 ): Promise<PoliticianProfile | null> {
@@ -95,7 +97,8 @@ export async function crosswalkProfile(
 /**
  * Resolve a normalized slug filter to its verified profile. A digit-only value equal to a current
  * official personId goes through {@link crosswalkProfile}, the roster read before any OpenParliament
- * request; every other value, numeric OpenParliament IDs included, is a slug. Null when
+ * request; every other value, numeric OpenParliament IDs included, is a slug. Former members'
+ * personIds stay slugs too: some equal another politician's numeric OpenParliament ID. Null when
  * OpenParliament has no such politician or no unique profile verifies; roster and other source
  * failures propagate.
  */

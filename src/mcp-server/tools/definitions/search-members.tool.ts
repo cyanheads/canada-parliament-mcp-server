@@ -21,10 +21,11 @@ import {
   OffsetSchema,
   OptionalStringSchema,
   PaginationSchema,
+  type SourceResult,
   SourceSchema,
 } from '@/domain/schemas.js';
 import { getOpenParliamentService } from '@/services/openparliament/index.js';
-import { getOurCommonsService } from '@/services/ourcommons/index.js';
+import { getOurCommonsService, type RosterMember } from '@/services/ourcommons/index.js';
 import { fitResponsePage, formatResult, measuredTrailer } from './_format.js';
 
 /** Identifiers and known member attributes without inferred historical facts. */
@@ -33,13 +34,30 @@ export const MemberSummarySchema = z
     personId: z.string().nullable().describe('Official person ID, or null.'),
     slug: z.string().nullable().describe('Verified OpenParliament slug, or null.'),
     name: z.string().describe('Recorded full name.'),
-    party: z.string().nullable().describe('Source caucus name, or null.'),
+    party: z
+      .string()
+      .nullable()
+      .describe(
+        "Source caucus name, or null. An official roster row carries one caucus per member, the last held in its Parliament: a past Parliament's row, or a former member's row from their latest Parliament.",
+      ),
     riding: z.string().nullable().describe('Source riding name, or null.'),
     province: z.string().nullable().describe('Province or territory, or null.'),
     current: z
       .boolean()
       .nullable()
       .describe('Current official roster membership, or null if unverified.'),
+    from: z
+      .string()
+      .nullable()
+      .describe(
+        "Start of the official roster membership this row describes, the roster's FromDateTime as published; null without an official roster row.",
+      ),
+    to: z
+      .string()
+      .nullable()
+      .describe(
+        "End of that membership, the roster's ToDateTime as published; null while sitting or without an official roster row.",
+      ),
     url: z.string().describe('Absolute HTTPS member profile URL.'),
     detailLookup: z
       .union([
@@ -64,10 +82,17 @@ const enrichment = {
     .number()
     .int()
     .optional()
-    .describe('Exact filtered current roster count; absent for historical searches.'),
+    .describe(
+      'Exact filtered count of the official roster searched, current or parliament; absent for historical searches.',
+    ),
   appliedFilters: z
     .object({
       includeFormer: z.boolean().describe('Selected historical mode.'),
+      parliament: z
+        .number()
+        .int()
+        .nullable()
+        .describe('Parliament whose official roster was searched, or null.'),
       name: z.string().nullable().describe('Applied name text.'),
       nameMode: z
         .enum(['substring', 'surname', 'full_name', 'index'])
@@ -90,24 +115,34 @@ const enrichment = {
 /** Search complete current roster or page the source historical name index. */
 export const searchMembersTool = tool('canparl_search_members', {
   description:
-    "Find current House MPs by name, riding, province, or caucus. Set includeFormer for OpenParliament's historical name index; historical rows may contain only a name and slug. Follow nextOffset with identical filters and use detailLookup with canparl_get_member.",
+    "Find House MPs by name, riding, province, or caucus in the complete current official roster, or set parliament to search everyone who sat in that Parliament (36th onward) with official personIds and membership dates. Set includeFormer for OpenParliament's historical name index; its rows may contain only a name and slug. Follow nextOffset with identical filters and use detailLookup with canparl_get_member.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     includeFormer: z
       .boolean()
       .default(false)
       .describe(
-        'Use the sparse historical name index instead of the complete current official roster.',
+        'Use the sparse historical name index instead of an official roster; parliament, riding, province, and party are rejected with it.',
+      ),
+    parliament: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'Parliament number, such as 41, whose official House roster to search instead of the current one: everyone who sat in it, one row each with the caucus and riding last held there. The official roster offers the 36th onward; another number fails listing those offered. Not with includeFormer.',
       ),
     name: OptionalStringSchema.describe(
-      'Current: literal name substring. Historical: one token is surname lookup; multiple tokens are full recorded name lookup, not substring search.',
+      "Official roster: literal name substring; matching ignores case, accents, dash and quote styles, and repeated whitespace. Historical: OpenParliament's own match, where one token is surname lookup and multiple tokens are full recorded name lookup, not substring search.",
     ),
-    riding: OptionalStringSchema.describe('Literal riding substring; current roster only.'),
+    riding: OptionalStringSchema.describe(
+      'Literal riding substring; matching ignores case, accents, dash and quote styles, and repeated whitespace. Official rosters only, not includeFormer.',
+    ),
     province: OptionalStringSchema.describe(
-      'Province postal code or full English name; current roster only.',
+      'Province postal code or full English name; official rosters only, not includeFormer.',
     ),
     party: OptionalStringSchema.describe(
-      'Official caucus name; Bloc and Green aliases accepted; current roster only.',
+      "Official caucus name; Bloc and Green aliases accepted; official rosters only, not includeFormer. With parliament, matches the one caucus each member last held in that Parliament, and that roster's own caucus names are accepted.",
     ),
     limit: LimitSchema.describe(
       'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
@@ -119,7 +154,7 @@ export const searchMembersTool = tool('canparl_search_members', {
       .number()
       .int()
       .nullable()
-      .describe('Exact filtered current count; null for historical index.'),
+      .describe('Exact filtered count of the official roster searched; null for historical index.'),
     members: z.array(MemberSummarySchema).describe('Returned member identities.'),
     pagination: PaginationSchema.describe('Continuation in the selected source ordering.'),
     provenance: z.array(SourceSchema).describe('Original source retrieval metadata.'),
@@ -130,17 +165,17 @@ export const searchMembersTool = tool('canparl_search_members', {
     {
       reason: 'unsupported_historical_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Historical mode includes geographic or caucus filters.',
+      when: 'Historical mode includes parliament, geographic, or caucus filters.',
       recovery:
-        'Retry canparl_search_members with includeFormer false for geographic or party filters, or omit those filters for historical name lookup.',
+        'Retry canparl_search_members with includeFormer false for parliament, geographic, or party filters, or omit those filters for historical name lookup.',
       retryable: false,
     },
     {
       reason: 'invalid_member_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Unknown province or current caucus.',
+      when: 'Unknown province, a caucus absent from the searched roster and the catalog, or a parliament the official roster does not offer.',
       recovery:
-        'Call canparl_list_reference with topic parties, then retry canparl_search_members with a listed caucus and a province code or full name.',
+        'Retry canparl_search_members with a value the error lists: a caucus, a province code or full name, or an offered Parliament number. canparl_list_reference topic parties lists current caucuses.',
       retryable: false,
     },
     {
@@ -151,11 +186,23 @@ export const searchMembersTool = tool('canparl_search_members', {
       retryable: false,
       thrownBy: 'service',
     },
+    {
+      reason: 'roster_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The official roster of an offered Parliament came back empty.',
+      recovery:
+        'Retry canparl_search_members later with the same parliament, or omit parliament to search the current roster.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
     try {
-      if (input.includeFormer && (input.riding || input.province || input.party))
+      if (
+        input.includeFormer &&
+        (input.riding || input.province || input.party || input.parliament !== undefined)
+      )
         throw ctx.fail('unsupported_historical_filter');
       const limit = clampCount('limit', input.limit, LIST_CAP);
       const notices: string[] = limit.notice ? [limit.notice] : [];
@@ -186,6 +233,8 @@ export const searchMembersTool = tool('canparl_search_members', {
           riding: null,
           province: null,
           current: null,
+          from: null,
+          to: null,
           url: row.url,
           detailLookup: { slug: row.slug },
         }));
@@ -216,6 +265,7 @@ export const searchMembersTool = tool('canparl_search_members', {
               enriched: {
                 appliedFilters: {
                   includeFormer: true,
+                  parliament: null,
                   name: input.name ?? null,
                   nameMode,
                   riding: null,
@@ -234,7 +284,22 @@ export const searchMembersTool = tool('canparl_search_members', {
         request.throwIfAborted();
         return result;
       }
-      const roster = await getOurCommonsService().listMembers(request);
+      const house = getOurCommonsService();
+      let roster: SourceResult<RosterMember[]>;
+      let isCurrent = (_personId: string) => true;
+      if (input.parliament === undefined) roster = await house.listMembers(request);
+      else {
+        try {
+          roster = await house.listParliamentMembers(input.parliament, request);
+        } catch (error) {
+          throw ctx.fail('invalid_member_filter', ...filterFailure(error));
+        }
+        // Currentness comes from the current roster, never from a Parliament row's dates.
+        const current = await house.listMembers(request);
+        const currentIds = new Set(current.data.map((row) => row.personId));
+        isCurrent = (personId) => currentIds.has(personId);
+        roster = { ...roster, provenance: [...roster.provenance, ...current.provenance] };
+      }
       let province: string | undefined;
       let party: string | undefined;
       try {
@@ -265,7 +330,12 @@ export const searchMembersTool = tool('canparl_search_members', {
         );
       const page = paginate(rows, input.offset, limit.value);
       const members = page.items.map(({ firstName: _first, lastName: _last, ...member }) =>
-        MemberSummarySchema.parse(member),
+        MemberSummarySchema.parse({
+          ...member,
+          current: isCurrent(member.personId),
+          slug: null,
+          detailLookup: { personId: member.personId },
+        }),
       );
       if (!members.length)
         notices.push(
@@ -291,6 +361,7 @@ export const searchMembersTool = tool('canparl_search_members', {
               totalCount: page.total,
               appliedFilters: {
                 includeFormer: false,
+                parliament: input.parliament ?? null,
                 name: input.name ?? null,
                 nameMode: 'substring' as const,
                 riding: input.riding ?? null,

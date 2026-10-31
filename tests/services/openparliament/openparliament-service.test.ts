@@ -147,7 +147,10 @@ describe('OpenParliamentService network contracts', () => {
         budget,
       ),
     );
-    expect(result.objects[0]).toMatchObject({ politician: null, content: 'Institutional & full' });
+    expect(result.objects[0]).toMatchObject({
+      politician: null,
+      content: { en: 'Institutional & full', fr: null },
+    });
   });
   it.each(['profile', 'bill', 'vote', 'ballot', 'membership'])(
     'rejects mismatched requested %s identities after one attempt',

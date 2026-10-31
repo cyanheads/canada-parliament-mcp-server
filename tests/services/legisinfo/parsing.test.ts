@@ -4,7 +4,7 @@
  */
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JsonRecord } from '@/domain/schemas.js';
 import {
   parseBillDossier,
@@ -104,43 +104,43 @@ describe('official bill records', () => {
   const assent = (value: string | null) => ({ ...identity, ReceivedRoyalAssentDateTime: value });
   it.each([
     [
-      'an Ottawa daylight instant',
+      'an Ottawa daylight clock',
       '2026-03-26T06:50:00-04:00',
       '2026-03-26T10:50:00',
-      '2026-03-26T10:50:00Z',
+      '2026-03-26T14:50:00Z',
     ],
     [
-      'a date-only midnight',
+      'a summer date-only midnight',
       '2018-06-20T20:00:00-04:00',
       '2018-06-21T00:00:00',
-      '2018-06-21T00:00:00Z',
+      '2018-06-21T04:00:00Z',
     ],
     [
-      'an Ottawa standard-time midnight',
+      'a winter date-only midnight',
       '2012-12-13T19:00:00-05:00',
       '2012-12-14T00:00:00',
-      '2012-12-14T00:00:00Z',
+      '2012-12-14T05:00:00Z',
     ],
     [
       'fractional seconds',
       '2017-10-06T08:28:30.38-04:00',
       '2017-10-06T12:28:30.38',
-      '2017-10-06T12:28:30.38Z',
+      '2017-10-06T16:28:30.38Z',
     ],
     [
       'a positive offset',
       '2026-03-27T00:20:00+05:30',
       '2026-03-26T18:50:00Z',
-      '2026-03-26T18:50:00Z',
+      '2026-03-26T22:50:00Z',
     ],
     [
       'an explicit UTC designator',
       '2026-03-26T10:50:00Z',
       '2026-03-26T06:50:00-04:00',
-      '2026-03-26T10:50:00Z',
+      '2026-03-26T14:50:00Z',
     ],
   ])(
-    'reports royal assent from %s as one UTC instant on both feeds',
+    'reports royal assent from %s as the UTC instant of its Ottawa clock on both feeds',
     (_case, list, detail, instant) => {
       expect(parseBillSummary(assent(list)).royalAssentDate).toBe(instant);
       expect(dossier(assent(detail)).bill.royalAssentDate).toBe(instant);
@@ -152,6 +152,8 @@ describe('official bill records', () => {
     ['an impossible calendar date', '2026-02-30T00:00:00-05:00'],
     ['hour 24', '2026-03-26T24:00:00-04:00'],
     ['an out-of-range offset', '2026-03-26T06:50:00-25:00'],
+    ['an Ottawa clock before 1974', '1973-07-01T12:00:00'],
+    ['an offset rendering of a clock before 1974', '1973-07-01T08:00:00-04:00'],
   ])('relays royal assent with %s as published on both feeds', (_case, value) => {
     expect(parseBillSummary(assent(value)).royalAssentDate).toBe(value);
     expect(dossier(assent(value)).bill.royalAssentDate).toBe(value);
@@ -407,6 +409,156 @@ describe('official bill records', () => {
   });
 });
 
+/**
+ * LEGISinfo's clocks are Ottawa wall time: the dossier publishes the digits, the list feed renders
+ * them read as UTC with Toronto's offset. Each list rendering and instant below comes from the
+ * America/Toronto rules in the tz database. The host zone must not matter, so the table runs under
+ * UTC and under Toronto itself.
+ */
+describe.each(['UTC', 'America/Toronto'])('Ottawa clock conversion with the host in %s', (zone) => {
+  beforeEach(() => {
+    vi.stubEnv('TZ', zone);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  const assent = (value: string) => ({ ...identity, ReceivedRoyalAssentDateTime: value });
+  it('runs with the host zone switched', () => {
+    expect(new Date(Date.UTC(2026, 0, 15)).getTimezoneOffset()).toBe(zone === 'UTC' ? 0 : 300);
+  });
+  it.each([
+    [
+      '45-1 C-15 royal assent (EDT)',
+      '2026-03-26T10:50:00',
+      '2026-03-26T06:50:00-04:00',
+      '2026-03-26T14:50:00Z',
+    ],
+    [
+      '45-1 C-15 House first reading (EST)',
+      '2025-11-18T15:12:48.157',
+      '2025-11-18T10:12:48.157-05:00',
+      '2025-11-18T20:12:48.157Z',
+    ],
+    [
+      '45-1 C-15 House third reading (EST)',
+      '2026-02-26T16:29:18.793',
+      '2026-02-26T11:29:18.793-05:00',
+      '2026-02-26T21:29:18.793Z',
+    ],
+    [
+      '45-1 C-5 House first reading (EDT)',
+      '2025-06-06T12:11:36.473',
+      '2025-06-06T08:11:36.473-04:00',
+      '2025-06-06T16:11:36.473Z',
+    ],
+    [
+      '45-1 C-5 House third reading (EDT)',
+      '2025-06-20T18:00:08',
+      '2025-06-20T14:00:08-04:00',
+      '2025-06-20T22:00:08Z',
+    ],
+    [
+      '36-1 C-2 royal assent at Ottawa midnight (EST)',
+      '1997-12-18T00:00:00',
+      '1997-12-17T19:00:00-05:00',
+      '1997-12-18T05:00:00Z',
+    ],
+    [
+      '42-1 C-45 royal assent at Ottawa midnight (EDT)',
+      '2018-06-21T00:00:00',
+      '2018-06-20T20:00:00-04:00',
+      '2018-06-21T04:00:00Z',
+    ],
+    [
+      'the day before the 1998 change (EST)',
+      '1998-04-04T12:00:00',
+      '1998-04-04T07:00:00-05:00',
+      '1998-04-04T17:00:00Z',
+    ],
+    [
+      'the first Sunday of April 1998 (EDT)',
+      '1998-04-05T12:00:00',
+      '1998-04-05T08:00:00-04:00',
+      '1998-04-05T16:00:00Z',
+    ],
+    [
+      'the last standard second before spring forward',
+      '2026-03-08T01:59:59',
+      '2026-03-07T20:59:59-05:00',
+      '2026-03-08T06:59:59Z',
+    ],
+    [
+      'a skipped spring-forward clock, at the offset before the change',
+      '2026-03-08T02:30:00',
+      '2026-03-07T21:30:00-05:00',
+      '2026-03-08T07:30:00Z',
+    ],
+    [
+      'the first daylight clock after spring forward',
+      '2026-03-08T03:00:00',
+      '2026-03-07T22:00:00-05:00',
+      '2026-03-08T07:00:00Z',
+    ],
+    [
+      'the last daylight second before the repeated hour',
+      '2025-11-02T00:59:59',
+      '2025-11-01T20:59:59-04:00',
+      '2025-11-02T04:59:59Z',
+    ],
+    [
+      'a repeated fall-back clock, at its earlier instant',
+      '2025-11-02T01:30:00',
+      '2025-11-01T21:30:00-04:00',
+      '2025-11-02T05:30:00Z',
+    ],
+    [
+      'the first standard clock after fall back',
+      '2025-11-02T02:00:00',
+      '2025-11-01T22:00:00-04:00',
+      '2025-11-02T07:00:00Z',
+    ],
+    [
+      'the 1974 change on the last Sunday of April',
+      '1974-04-28T03:00:00',
+      '1974-04-27T22:00:00-05:00',
+      '1974-04-28T07:00:00Z',
+    ],
+    [
+      'the 1986 repeated hour on the last Sunday of October',
+      '1986-10-26T01:30:00',
+      '1986-10-25T21:30:00-04:00',
+      '1986-10-26T05:30:00Z',
+    ],
+    [
+      'the 2006 change on the first Sunday of April',
+      '2006-04-02T03:00:00',
+      '2006-04-01T22:00:00-05:00',
+      '2006-04-02T07:00:00Z',
+    ],
+    [
+      'November 2006, already standard',
+      '2006-11-01T12:00:00',
+      '2006-11-01T07:00:00-05:00',
+      '2006-11-01T17:00:00Z',
+    ],
+    [
+      'the 2007 change on the second Sunday of March',
+      '2007-03-11T03:00:00',
+      '2007-03-10T22:00:00-05:00',
+      '2007-03-11T07:00:00Z',
+    ],
+    [
+      'November 2007, still daylight',
+      '2007-11-01T12:00:00',
+      '2007-11-01T08:00:00-04:00',
+      '2007-11-01T16:00:00Z',
+    ],
+  ])('reads %s as Ottawa time on both feeds', (_case, clock, list, instant) => {
+    expect(dossier(assent(clock)).bill.royalAssentDate).toBe(instant);
+    expect(parseBillSummary(assent(list)).royalAssentDate).toBe(instant);
+  });
+});
+
 describe('dossier summary, notes, web references, and reading milestones', () => {
   it('surfaces the sponsor title, all six reading milestones, and every web reference of 45-1 C-15', () => {
     const row = realRow('45-1-c-15');
@@ -416,14 +568,14 @@ describe('dossier summary, notes, web references, and reading milestones', () =>
       fr: 'ministre des Finances et du Revenu national',
     });
     expect(result.milestones).toEqual({
-      houseFirstReading: '2025-11-18T15:12:48.157Z',
-      houseSecondReading: '2025-12-10T16:01:20Z',
-      houseThirdReading: '2026-02-26T16:29:18.793Z',
-      senateFirstReading: '2026-02-26T10:15:00Z',
-      senateSecondReading: '2026-03-10T10:10:00Z',
-      senateThirdReading: '2026-03-26T10:10:00Z',
+      houseFirstReading: '2025-11-18T20:12:48.157Z',
+      houseSecondReading: '2025-12-10T21:01:20Z',
+      houseThirdReading: '2026-02-26T21:29:18.793Z',
+      senateFirstReading: '2026-02-26T15:15:00Z',
+      senateSecondReading: '2026-03-10T14:10:00Z',
+      senateThirdReading: '2026-03-26T14:10:00Z',
     });
-    expect(result.bill.royalAssentDate).toBe('2026-03-26T10:50:00Z');
+    expect(result.bill.royalAssentDate).toBe('2026-03-26T14:50:00Z');
     const refs = row.WebReferences as JsonRecord[];
     expect(result.webReferences).toHaveLength(21);
     expect(result.webReferences).toEqual(
@@ -505,7 +657,7 @@ describe('dossier summary, notes, web references, and reading milestones', () =>
       notes: { en: null, fr: null },
       webReferences: [],
       milestones: {
-        houseFirstReading: '1994-01-18T00:00:00Z',
+        houseFirstReading: '1994-01-18T05:00:00Z',
         houseSecondReading: null,
         houseThirdReading: null,
         senateFirstReading: null,
@@ -561,6 +713,21 @@ describe('dossier summary, notes, web references, and reading milestones', () =>
     }
   });
 
+  it('joins summary and notes table cells with " | ", keeping a cell link target', () => {
+    const table =
+      '<table>\n  <tr><th>Year</th><th>Amount</th></tr>\n  <tr><td>2025</td><td><a href="https://x.test/t">100</a></td></tr>\n</table>';
+    expect(
+      dossier({
+        ...identity,
+        ShortLegislativeSummaryEn: `<div>Totals:${table}</div>`,
+        NotesFr: table,
+      }),
+    ).toMatchObject({
+      summary: { en: 'Totals:\n\nYear | Amount\n\n2025 | 100 (https://x.test/t)\n\n', fr: null },
+      notes: { en: null, fr: 'Year | Amount\n\n2025 | 100 (https://x.test/t)\n\n' },
+    });
+  });
+
   it('keeps absent, blank, and markup-only text null and preserves null versus empty references', () => {
     expect(dossier(identity)).toMatchObject({
       sponsor: { title: { en: null, fr: null } },
@@ -609,10 +776,10 @@ describe('dossier summary, notes, web references, and reading milestones', () =>
         ReceivedRoyalAssentDateTime: '2026-01-07T00:00:00',
       }).milestones,
     ).toEqual({
-      houseFirstReading: '2026-01-01T00:00:00Z',
-      houseSecondReading: '2026-01-02T00:00:00.5Z',
-      houseThirdReading: '2026-01-03T11:50:00Z',
-      senateFirstReading: '2026-01-04T00:00:00Z',
+      houseFirstReading: '2026-01-01T05:00:00Z',
+      houseSecondReading: '2026-01-02T05:00:00.5Z',
+      houseThirdReading: '2026-01-03T16:50:00Z',
+      senateFirstReading: '2026-01-04T05:00:00Z',
       senateSecondReading: 'pending',
       senateThirdReading: null,
     });
