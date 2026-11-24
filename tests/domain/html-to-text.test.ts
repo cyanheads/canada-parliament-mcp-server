@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { htmlToText } from '@/domain/html-to-text.js';
-import { cpu } from '../fixtures/cpu-timing.js';
+import { expectLinearCpu } from '../fixtures/cpu-timing.js';
 
 describe('htmlToText', () => {
   it.each([
@@ -232,14 +232,6 @@ describe('htmlToText timing', { timeout: 0 }, () => {
       (n: number) => `<table><tr>${'<td>a</td> \r\n'.repeat(n / 13)}</tr></table>`,
     ],
   ])('stays linear on %s', (_shape, build) => {
-    htmlToText(build(sizes[0] as number));
-    const perCall: number[] = [];
-    for (const size of sizes) {
-      const input = build(size);
-      const used = cpu(() => htmlToText(input), Math.max(1, 20_000 / size), 2);
-      expect(used, `${size} characters`).toBeLessThan(500_000);
-      perCall.push(used);
-    }
-    expect((perCall.at(-1) as number) / (perCall[0] as number)).toBeLessThan(256);
+    expectLinearCpu(htmlToText, build, sizes);
   });
 });
