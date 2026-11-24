@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-11-23 22:46:53
+Generated on: 2026-11-24 00:46:31
 
 ```text
 canada-parliament-mcp-server/
@@ -26,6 +26,7 @@ canada-parliament-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-11-23 · ⚠️ Breaking
+
+Read a bill version's text with the new canparl_get_bill_text, find sitting MPs by postal code, follow a bill to its earlier versions, and page and tally an MP's official ballots; pages return the full limit instead of stopping at 24,000 bytes. canparl_get_member recentVotes.total changes from always null to an integer.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-10-31 · 🛡️ Security
 
 Search a past Parliament's House roster and open former members' profiles, read and search French Hansard, get royal assent and reading times as UTC instants, match text filters across accents, dashes, and quotes, and see each fixed input format in the tool schemas; text and vocabulary filters run in time linear in the value's length.
