@@ -1,6 +1,6 @@
 # canada-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-31 21:17:03
+Generated on: 2026-11-23 22:46:53
 
 ```text
 canada-parliament-mcp-server/
@@ -147,12 +147,14 @@ canada-parliament-mcp-server/
 │   │   ├── normalization.ts
 │   │   ├── reference-catalog.ts
 │   │   ├── request-context.ts
-│   │   └── schemas.ts
+│   │   ├── schemas.ts
+│   │   └── xml-entities.ts
 │   ├── mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── _format.ts
 │   │           ├── _member-identity.ts
+│   │           ├── get-bill-text.tool.ts
 │   │           ├── get-bill.tool.ts
 │   │           ├── get-member.tool.ts
 │   │           ├── get-vote.tool.ts
@@ -163,6 +165,7 @@ canada-parliament-mcp-server/
 │   │           └── search-votes.tool.ts
 │   ├── services/
 │   │   ├── legisinfo/
+│   │   │   ├── bill-text.ts
 │   │   │   ├── index.ts
 │   │   │   ├── legisinfo-service.ts
 │   │   │   ├── parsing.ts
@@ -185,26 +188,50 @@ canada-parliament-mcp-server/
 │   │   ├── html-to-text.test.ts
 │   │   ├── normalization.test.ts
 │   │   ├── request-context.test.ts
-│   │   └── schemas.test.ts
+│   │   ├── schemas.test.ts
+│   │   └── xml-entities.test.ts
 │   ├── fixtures/
 │   │   ├── bill-tools/
 │   │   │   ├── dossiers/
 │   │   │   │   ├── 35-1-c-1.json
+│   │   │   │   ├── 35-2-c-2.json
+│   │   │   │   ├── 37-1-c-15a.json
+│   │   │   │   ├── 41-1-c-201.json
 │   │   │   │   ├── 41-1-c-38.json
+│   │   │   │   ├── 41-2-c-201.json
 │   │   │   │   ├── 42-1-c-86.json
+│   │   │   │   ├── 43-2-c-218.json
+│   │   │   │   ├── 43-2-s-230.json
 │   │   │   │   ├── 44-1-c-69.json
-│   │   │   │   └── 45-1-c-15.json
+│   │   │   │   ├── 45-1-c-15.json
+│   │   │   │   └── 45-1-c-9.json
+│   │   │   ├── text/
+│   │   │   │   ├── C-15_1_E.xml
+│   │   │   │   ├── C-202_4_E.xml
+│   │   │   │   ├── S-2_1_E.xml
+│   │   │   │   ├── S-2_1_F.xml
+│   │   │   │   ├── viewer-37-1-C-15A-pdf-only.html
+│   │   │   │   ├── viewer-41-2-C-8-toc.html
+│   │   │   │   ├── viewer-C-202-royal-assent.html
+│   │   │   │   ├── viewer-S-2-first-reading.html
+│   │   │   │   └── viewer-S-2-premiere-lecture.html
+│   │   │   ├── bill-text.ts
 │   │   │   └── harness.ts
 │   │   ├── integration/
 │   │   │   └── upstream-preload.ts
 │   │   ├── member-tools/
 │   │   │   ├── member-votes/
+│   │   │   │   ├── 110572-latest.xml
 │   │   │   │   ├── 1463-38-1.xml
 │   │   │   │   ├── 2897-44-1.xml
 │   │   │   │   ├── 2897-45-1.xml
 │   │   │   │   ├── 35933-latest.xml
 │   │   │   │   ├── 88721-45-1.xml
 │   │   │   │   └── empty.xml
+│   │   │   ├── postal/
+│   │   │   │   ├── k0a1l0.xml
+│   │   │   │   ├── k1a0a6.xml
+│   │   │   │   └── z9z9z9.xml
 │   │   │   ├── rosters/
 │   │   │   │   ├── all.xml
 │   │   │   │   ├── current.xml
@@ -221,10 +248,13 @@ canada-parliament-mcp-server/
 │   │   │   └── harness.ts
 │   │   ├── vote-tools/
 │   │   │   └── harness.ts
+│   │   ├── cpu-timing.test.ts
 │   │   ├── cpu-timing.ts
 │   │   ├── filter-rejection.ts
 │   │   └── markdown-decode.ts
 │   ├── fuzz/
+│   │   └── domain/
+│   │       └── normalization.test.ts
 │   ├── integration/
 │   │   └── parliament-server.test.ts
 │   ├── prompts/
@@ -233,6 +263,7 @@ canada-parliament-mcp-server/
 │   │   └── bundle-runtime-paths.test.ts
 │   ├── services/
 │   │   ├── legisinfo/
+│   │   │   ├── bill-text.test.ts
 │   │   │   ├── legisinfo-service.test.ts
 │   │   │   └── parsing.test.ts
 │   │   ├── openparliament/
@@ -244,6 +275,7 @@ canada-parliament-mcp-server/
 │   ├── smoke/
 │   └── tools/
 │       ├── format.test.ts
+│       ├── get-bill-text.test.ts
 │       ├── get-bill.test.ts
 │       ├── get-member.test.ts
 │       ├── get-vote.test.ts
@@ -264,6 +296,7 @@ canada-parliament-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

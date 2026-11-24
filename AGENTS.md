@@ -2,8 +2,8 @@
 
 **Server:** canada-parliament-mcp-server
 **Version:** 0.2.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -44,13 +44,14 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Patterns
 
-Eight read-only tools and the `canada-parliament-guide` skill are registered in `src/index.ts`. The skill is served as an MCP resource; there are no prompts. Read the real definitions instead of copying generic examples:
+Nine read-only tools and the `canada-parliament-guide` skill are registered in `src/index.ts`. The skill is served as an MCP resource; there are no prompts. Read the real definitions instead of copying generic examples:
 
 | Definition | Pattern |
 |:---|:---|
 | `search-votes.tool.ts` | Validate filters, load the complete official feed, paginate, enrich, render |
 | `get-member.tool.ts` | Verified identity crosswalk and independently pageable optional activity |
 | `get-bill.tool.ts` | Lossless outline/section retrieval and whole-record pagination |
+| `get-bill-text.tool.ts` | Verified official-XML read, whole-text outline, and whole-section segment pages |
 | `search-speeches.tool.ts` | Bounded raw-candidate scan and historical membership hydration |
 
 All definitions use `formatResult` from `_format.ts`, with reversible Markdown values matching `structuredContent`. Preserve source text as data, never instructions.
@@ -65,29 +66,29 @@ All definitions use `formatResult` from `_format.ts`, with reversible Markdown v
 
 | Service | Owned data |
 |:---|:---|
-| `legisinfo` | Official sessions, current session, complete session bill lists, dossiers |
-| `ourcommons` | Current and per-Parliament House rosters, division sessions/lists/participants, member votes |
+| `legisinfo` | Official sessions, current session, complete session bill lists, dossiers, bill-version text (DocumentViewer export link, then the bill XML) |
+| `ourcommons` | Current and per-Parliament House rosters, postal-code lookup, division sessions/lists/participants, member votes |
 | `openparliament` | Historical identities, sponsored bills, ballots for members without one official personId, speeches, dated memberships |
 
 `setup()` initializes all three services; `teardown()` disposes their pacers and caches. HTTP defaults to stateless. Source caches hold parsed public data only; no durable personal-data store.
 
 Each handler creates a request context and disposes it in `finally`. One 50-second deadline covers queueing, retrying, body reads, and hydration; the upstream subdeadline is 45 seconds. Optional member/speech enrichment may become explicitly unavailable, but caller cancellation and the outer deadline always fail the call. Never turn unavailable history into an empty-history claim.
 
-Requests use fixed HTTPS origins `www.parl.ca`, `www.ourcommons.ca`, and `api.openparliament.ca`. Validate identifiers and pagination links; returned image/publication/profile links are references, never arbitrary fetch targets. Cache successful responses only and retain original retrieval timestamps.
+Requests use fixed HTTPS origins `www.parl.ca`, `www.ourcommons.ca`, and `api.openparliament.ca`. Validate identifiers and pagination links; returned image/publication/profile links are references, never arbitrary fetch targets; `canparl_get_bill_text` builds its DocumentViewer request from a validated publication ID and fetches only a same-origin `/Content/Bills/` XML export in the requested language. Cache successful responses only and retain original retrieval timestamps.
 
 Official HTTP 403 refusals become source-named `upstream_blocked` ServiceUnavailable failures with status 403, no retry, and source-specific retry-later recovery. Disable upstream error-body capture before framework logging. Never bypass source restrictions or substitute unofficial data. Optional enrichment keeps its unavailable-section contract.
 
 ### Domain constraints
 
 - Bills cover both chambers; members, divisions, and speeches cover the House only. Early bill sessions have basic coverage and nullable dossier fields.
-- Official `personId` and OpenParliament `slug` are distinct. Use returned `detailLookup` and verified crosswalks, never name-derived slugs. Slug inputs (`slug`, `sponsor`, `politician`) read a digit-only value equal to a current personId, or its `/politicians/<digits>/` path or profile URL, through the shared crosswalk in `_member-identity.ts`, the roster first; every other numeric value is an OpenParliament ID. Never request `/politicians/{personId}/`.
-- Fixed input formats (date, session, personId, bill code, bill `section`) are one `InputFormat` in `normalization.ts`, advertised as a schema `pattern` and parsed by the same normalizer (`optionalFormat`/`requiredFormat` in `schemas.ts`). Shape failures are schema-level `-32602 invalid_arguments`; semantic failures (impossible dates, reversed bounds, out-of-range session numbers, unknown vocabulary, malformed slugs) keep their tool reasons. Slug inputs carry no pattern.
+- Official `personId` and OpenParliament `slug` are distinct. Use returned `detailLookup` and verified crosswalks, never name-derived slugs. Slug inputs (`slug`, `sponsor`, `politician`) read a digit-only value equal to a current personId, or its `/politicians/<digits>/` path or profile URL, through the shared crosswalk in `_member-identity.ts`, the roster first; every other numeric value is an OpenParliament ID, and when it is also a former MP's personId a best-effort, 5-second all-Parliaments roster read adds a notice naming both people (never supplying the profile's personId). Never request `/politicians/{personId}/`.
+- Fixed input formats (date, session, personId, bill code, postal code, bill `section`, bill-text `segment`) are one `InputFormat` in `normalization.ts`, advertised as a schema `pattern` and parsed by the same normalizer (`optionalFormat`/`requiredFormat` in `schemas.ts`). Shape failures are schema-level `-32602 invalid_arguments`; semantic failures (impossible dates, reversed bounds, out-of-range session numbers, unknown vocabulary, malformed slugs) keep their tool reasons. Slug inputs carry no pattern.
 - Sponsor filtering is the OpenParliament-indexed subset; a bounded incomplete scan fails rather than inventing completeness.
 - Current-person crosswalks retain strict index and recorded-profile name precedence. Only an empty terminal exact-name page opens surname discovery and a different accent-folded surname query; each page and the deduplicated union admit at most three candidates. A unique profile must verify the official personId and a recorded name or usable published alias, comparing accents and optional interior single-letter initials locally. Source names remain unchanged.
-- Official-roster search (current, or a past Parliament via `parliament`) filters the complete roster. Historical name lookup stays sparse and rejects unsupported parliament/geographic/caucus filters. A roster row holds one caucus per member (the last held), so `canparl_list_reference` `parties` answers the current session only. A former personId resolves on the all-Parliaments roster (`p=*`) in `canparl_get_member` only; slug inputs stay current-only.
+- Official-roster search (current, or a past Parliament via `parliament`) filters the complete roster. `postalCode` keeps the current-roster rows the official search's `q` returns for one canonical six-character code (a failed lookup fails the call; empty is a real answer) and is rejected with `includeFormer` or `parliament`. Historical name lookup stays sparse and rejects unsupported parliament/geographic/caucus filters. A roster row holds one caucus per member (the last held), so `canparl_list_reference` `parties` answers the current session only. A former personId resolves on the all-Parliaments roster (`p=*`) in `canparl_get_member` only; slug inputs stay current-only.
 - Speech `contains` is a bounded scan with raw-offset continuation and `exhausted`, over the selected `language` (`en`/`fr`) text; a speech without text in that language never matches. Hydrate affiliations from dated memberships, never current attributes.
-- One 24,000-byte complete-response budget and measure (`_format.ts`) bound `canparl_get_bill`, `canparl_get_vote`, and all four search tools; final notices and every enrichment field render through `renderValue` so the measure equals the wire. Large bill dossiers return an outline; pages preserve whole records, stop before the first that would exceed the budget, and return at least one when records exist; oversized indivisible records return with disclosure. Current searches advance by delivered rows; historical member pages preserve upstream nextOffset when delivered in full, otherwise resume at input offset plus delivered rows. Count acceptance, caps, and exact current totals stay unchanged.
-- Preserve source-specific vote vocabulary and full tallies independently of ballot-page filters. `canparl_get_member` ballots keep OpenParliament's `Yes`/`No` in `ballot` on every row and carry the official `Yea`/`Nay`/`Paired` in `officialBallot`.
+- `limit` is the only page boundary, never bytes: every page holds `min(limit, per-call cap, remaining)` whole records, and the caps (100 list rows and bill sections, 400 ballots, 10 speeches) are workload bounds. Never add a byte stop to a page. The one size threshold is `OUTLINE_THRESHOLD_BYTES` (24,000, with `responseBytes`, in `_format.ts`): an unselected `canparl_get_bill` or `canparl_get_bill_text` over it returns an outline, measured over the same `renderValue` rendering the wire carries, while a selected section, segment page, or language section returns whole at any size.
+- Preserve source-specific vote vocabulary and full tallies independently of ballot-page filters. `canparl_get_member` ballots keep OpenParliament's `Yes`/`No` in `ballot` on every row and carry the official `Yea`/`Nay`/`Paired` in `officialBallot`, with the division's `yeas`/`nays`/`paired` (null when absent, never 0). Official ballots page up to 100 per call with an exact `recentVotes.total`; OpenParliament ballots stay at 10 with a null `total`, since each row costs a paced request.
 - Profile links are never fetched: an absolute `http` or `https` URL without credentials is relayed as published, any other non-empty value is resolved against `https://openparliament.ca`, and empty, credentialed, `mailto:`, `javascript:`, `data:`, and `ftp:` values are rejected; only `https://` values render as links.
 - Tests run real parsers/services/handlers through synthetic fake HTTP responses, not mocked domain service methods.
 - Parliamentary data is unofficial and subject to its source reuse terms. Do not imply government endorsement or an open-data licence.
@@ -164,7 +165,7 @@ src/
     legisinfo/                    # index, service, parsing, types
     ourcommons/                   # index, service, parsing, types
     openparliament/               # index, service, parsing, types
-  mcp-server/tools/definitions/   # eight *.tool.ts definitions, _format.ts, and _member-identity.ts
+  mcp-server/tools/definitions/   # nine *.tool.ts definitions, _format.ts, and _member-identity.ts
 tests/
   config/
   domain/
@@ -276,13 +277,15 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 
+**Vitest is held at 5.1.0.** `vitest` and `@vitest/coverage-istanbul` are pinned exact and listed in `devcheck.config.json` `outdated.allowlist`. Vitest 5.1.1's forks pool calls `child.channel.unref()`, which Bun's child processes lack, so no test file starts under `bun --bun run test`. Bun's threads pool is no substitute: its workers keep the coordinator's time zone, while the Ottawa-clock table in `tests/services/legisinfo/parsing.test.ts` switches `TZ` between UTC and America/Toronto inside one file. Lift the hold, and its allowlist entries, once a Vitest release or a Bun version runs the forks pool under Bun.
+
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
 ---
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
