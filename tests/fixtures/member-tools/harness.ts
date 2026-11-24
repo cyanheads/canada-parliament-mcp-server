@@ -25,12 +25,22 @@ export const lawrenceCannon = (): Record<string, unknown> =>
  * Captured OurCommons `/Members/en/{personId}/votes/xml` bodies (2026-10-21). Rows are verbatim and
  * in feed order; each file keeps a subset: `2897-45-1` divisions 169–179, every C-15 division, and
  * the date-time inversions 159/158, 147/146, 131/130; `2897-44-1`, `35933-latest` (the request
- * without a session query, 41-2), `88721-45-1` (divisions 54–52, 53 Paired), and `1463-38-1` (former
- * member Jim Abbott, divisions 190–188, captured 2026-10-31) keep three rows; `empty` is the whole
- * body for a session the member did not sit in.
+ * without a session query, 41-2), `88721-45-1` (divisions 54–52, 54 and 53 Paired), and
+ * `1463-38-1` (former member Jim Abbott, divisions 190–188, captured 2026-10-31) keep three rows;
+ * `empty` is the whole body for a session the member did not sit in; `110572-latest` (captured
+ * 2026-11-23, the request without a session query) is the whole feed: all 196 divisions of 45-1,
+ * 103 Yea, 89 Nay, 4 Paired, C-15 on divisions 82–75 and 53, division 196 at 162/151/16
+ * `Ways and means`.
  */
 export const realMemberVotes = (
-  name: '2897-45-1' | '2897-44-1' | '35933-latest' | '88721-45-1' | '1463-38-1' | 'empty',
+  name:
+    | '2897-45-1'
+    | '2897-44-1'
+    | '35933-latest'
+    | '88721-45-1'
+    | '1463-38-1'
+    | '110572-latest'
+    | 'empty',
 ): string => readFileSync(new URL(`./member-votes/${name}.xml`, import.meta.url), 'utf8');
 /**
  * Captured OurCommons roster bodies (2026-10-31), rows verbatim in feed order with the captured root:
@@ -48,6 +58,16 @@ export const realRoster = (
     new URL(`./rosters/${name}.${name === 'picker' ? 'html' : 'xml'}`, import.meta.url),
     'utf8',
   );
+/**
+ * Captured OurCommons `/Members/en/search/xml?q=<code>` bodies (2026-11-23), verbatim: `k1a0a6` one
+ * row (110572 Yasir Naqvi, Ottawa Centre), `k0a1l0` two ridings (122850 Bruce Fanjoy, Carleton;
+ * 110459 Jenna Sudds, Kanata), `z9z9z9` the empty root.
+ */
+export const realPostalLookup = (code: 'k1a0a6' | 'k0a1l0' | 'z9z9z9'): string =>
+  readFileSync(new URL(`./postal/${code}.xml`, import.meta.url), 'utf8');
+/** Official Members search for one canonical postal code. */
+export const postalLookupUrl = (code: string) =>
+  `https://www.ourcommons.ca/Members/en/search/xml?q=${code}`;
 export const rosterPicker = 'https://www.ourcommons.ca/Members/en/search';
 /** Official roster URL for one Parliament, or every Parliament with `*`. */
 export const parliamentRosterUrl = (parliament: number | '*') =>

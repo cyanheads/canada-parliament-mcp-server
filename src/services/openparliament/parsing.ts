@@ -93,6 +93,13 @@ function date(value: unknown): string | null {
     return malformed('date');
   }
 }
+/** Missing count remains null; anything but a non-negative safe integer is malformed. */
+function count(value: unknown, field: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+    return malformed(field);
+  return value;
+}
 
 /** Validate a source path without accepting arbitrary URLs or escaped separators. */
 export function sourcePath(value: unknown, pattern: RegExp, field = 'url'): string {
@@ -334,6 +341,9 @@ export function parseVote(value: unknown): Vote {
     date: date(raw.date),
     subject: english(raw.description),
     result: text(raw.result),
+    yeas: count(raw.yea_total, 'yea_total'),
+    nays: count(raw.nay_total, 'nay_total'),
+    paired: count(raw.paired_total, 'paired_total'),
     url: `${PUBLIC_ORIGIN}${path}`,
   };
 }

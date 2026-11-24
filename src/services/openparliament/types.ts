@@ -59,14 +59,20 @@ export interface Ballot {
   politicianUrl: string;
   voteUrl: string;
 }
-/** Source vote detail. */
+/** Source vote detail; tallies are null when the source omits them, never 0. */
 export interface Vote {
   date: string | null;
+  /** `nay_total`. */
+  nays: number | null;
   number: number;
+  /** `paired_total`. */
+  paired: number | null;
   result: string | null;
   session: string;
   subject: string | null;
   url: string;
+  /** `yea_total`. */
+  yeas: number | null;
 }
 /**
  * Candidate speech with its attribution, headings, and complete plain text in both languages, and a

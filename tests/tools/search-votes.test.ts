@@ -59,44 +59,54 @@ describe('canparl_search_votes production contract', () => {
     });
   });
   it.each([1500, 15000])(
-    'fits complete divisions with repeated %i-character subjects',
+    'returns every complete division with repeated %i-character subjects in one page',
     async (size) => {
       const subject = 'é'.repeat(size);
       votes(
         http,
         Array.from({ length: 8 }, (_, i) => rawVote(i + 1, { DecisionDivisionSubject: subject })),
       );
-      const ids: number[] = [];
-      let offset: number | null = 0;
-      let pages = 0;
-      do {
-        const result = await call({ session: '45-1', limit: 10_000, offset });
-        const data = parity(result, searchVotesTool) as {
-          divisions: { number: number; subject: string }[];
-          pagination: { nextOffset: number | null };
-        };
-        const bytes = assertMeasuredResponse(result, searchVotesTool, data.divisions);
-        expect(data.divisions.length).toBeGreaterThan(0);
-        expect(result.structuredContent).toMatchObject({
-          total: 8,
-          cap: 100,
-          notice: expect.stringContaining('maximum of 100'),
-        });
-        for (const row of data.divisions) expect(row.subject).toBe(subject);
-        if (bytes > 24_000)
-          expect(result.structuredContent).toMatchObject({
-            shown: 1,
-            notice: expect.stringContaining('exceeds'),
-          });
-        ids.push(...data.divisions.map((row) => row.number));
-        offset = data.pagination.nextOffset;
-        if (offset !== null) expect(offset).toBe(ids.length);
-        expect(++pages).toBeLessThanOrEqual(8);
-      } while (offset !== null);
-      expect(pages).toBeGreaterThan(1);
-      expect(ids).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
+      const result = await call({ session: '45-1', limit: 10_000 });
+      const data = parity(result, searchVotesTool) as {
+        divisions: { number: number; subject: string }[];
+      };
+      expect(assertMeasuredResponse(result, searchVotesTool)).toBeGreaterThan(24_000);
+      expect(result.structuredContent).toMatchObject({
+        total: 8,
+        shown: 8,
+        cap: 100,
+        truncated: false,
+        pagination: { offset: 0, limit: 100, nextOffset: null, hasMore: false },
+        notice: 'limit 10000 exceeds the per-call maximum of 100; returned up to 100.',
+      });
+      for (const row of data.divisions) expect(row.subject).toBe(subject);
+      expect(data.divisions.map((row) => row.number)).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
     },
   );
+  it('continues heavy divisions by limit alone, returning each exactly once', async () => {
+    const subject = 'é'.repeat(15_000);
+    votes(
+      http,
+      Array.from({ length: 8 }, (_, i) => rawVote(i + 1, { DecisionDivisionSubject: subject })),
+    );
+    const ids: number[] = [];
+    const sizes: number[] = [];
+    let offset: number | null = 0;
+    do {
+      const result = await call({ session: '45-1', limit: 3, offset });
+      const data = parity(result, searchVotesTool) as {
+        divisions: { number: number }[];
+        pagination: { nextOffset: number | null };
+      };
+      expect(data).not.toHaveProperty('notice');
+      sizes.push(data.divisions.length);
+      ids.push(...data.divisions.map((row) => row.number));
+      offset = data.pagination.nextOffset;
+      if (offset !== null) expect(offset).toBe(ids.length);
+    } while (offset !== null);
+    expect(sizes).toEqual([3, 3, 2]);
+    expect(ids).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
+  });
   it('intersects canonical aliases and inclusive Ottawa dates with literal Unicode subjects', async () => {
     votes(http, rows);
     const result = await call({
@@ -185,21 +195,22 @@ describe('canparl_search_votes production contract', () => {
     });
     expect(http.calls.some((call) => call.request.url === current)).toBe(false);
   });
-  it('preserves the maximum cap while disclosing the response-budget stop', async () => {
+  it('returns the whole 100-row cap past 24000 bytes', async () => {
     votes(
       http,
       Array.from({ length: 100 }, (_, i) => rawVote(i + 1)),
     );
     const result = await call({ session: '45-1', limit: 100 });
-    parity(result, searchVotesTool);
+    const data = parity(result, searchVotesTool);
     expect(result.structuredContent).toMatchObject({
       total: 100,
-      shown: 31,
+      shown: 100,
       cap: 100,
-      truncated: true,
-      pagination: { nextOffset: 31 },
-      notice: expect.stringContaining('24000-byte response budget'),
+      truncated: false,
+      pagination: { nextOffset: null, hasMore: false },
     });
+    expect(data).not.toHaveProperty('notice');
+    expect(assertMeasuredResponse(result, searchVotesTool)).toBeGreaterThan(24_000);
   });
   it.each([101, 10_000])(
     'clamps limit %i to the 100-row cap and continues from nextOffset',
@@ -210,6 +221,7 @@ describe('canparl_search_votes production contract', () => {
       );
       const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
       const ids: number[] = [];
+      const sizes: number[] = [];
       let offset: number | null = 0;
       do {
         const result = await call({ session: '45-1', limit, offset });
@@ -220,15 +232,16 @@ describe('canparl_search_votes production contract', () => {
         expect(result.structuredContent).toMatchObject({
           total: 150,
           cap: 100,
-          notice: expect.stringContaining(notice),
+          notice,
           pagination: { offset, limit: 100 },
         });
-        expect(data.divisions.length).toBeGreaterThan(0);
+        sizes.push(data.divisions.length);
         ids.push(...data.divisions.map((row) => row.number));
         offset = data.pagination.nextOffset;
         if (offset !== null) expect(offset).toBe(ids.length);
         expect(ids.length).toBeLessThanOrEqual(150);
       } while (offset !== null);
+      expect(sizes).toEqual([100, 50]);
       expect(ids).toEqual(Array.from({ length: 150 }, (_, i) => 150 - i));
     },
   );

@@ -130,7 +130,7 @@ export function parity(
   assertDomainParity(body, [result.content[0]!]);
   assertDomainParity(body, definition.format!(body as never));
   expect(data.notice).toEqual(expect.any(String));
-  assertMeasuredResponse(result, definition, data.speeches as unknown[]);
+  assertMeasuredResponse(result, definition);
   return data;
 }
 /** Assert only declared error metadata, preserving omitted retryability. */

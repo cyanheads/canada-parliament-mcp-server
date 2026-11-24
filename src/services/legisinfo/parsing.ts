@@ -5,14 +5,21 @@
 import { notFound, serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { parseHTML } from 'linkedom';
 import { htmlToText } from '@/domain/html-to-text.js';
-import { assertRepresentableText } from '@/domain/normalization.js';
+import { assertRepresentableText, compareBillCodes } from '@/domain/normalization.js';
 import {
   type BilingualText,
   type JsonRecord,
   JsonRecordSchema,
   type JsonValue,
 } from '@/domain/schemas.js';
-import type { BillDossier, BillSummary, Chamber, LegisinfoSession, Stage } from './types.js';
+import type {
+  BillDossier,
+  BillSummary,
+  Chamber,
+  LegisinfoSession,
+  ReinstatementLink,
+  Stage,
+} from './types.js';
 
 /** Deterministic malformed-source failure; retries cannot repair schema drift. */
 export function invalidResponse(): never {
@@ -153,12 +160,14 @@ export function parseBillRecords(body: string): JsonRecord[] {
   if (!Array.isArray(value)) invalidResponse();
   return value.map(record);
 }
+/** Canonical House or Senate bill code with an optional split-bill suffix letter. */
+const BILL_CODE = /^[CS]-[1-9]\d*[A-Z]?$/;
 /** Verified identity, never inferred from requested URL alone. */
 export function billIdentity(row: JsonRecord): { session: string; billCode: string } {
   const parliament = requiredInteger(row.ParliamentNumber);
   const session = requiredInteger(row.SessionNumber);
   const billCode = text(row.NumberCode);
-  if (!billCode || !/^[CS]-[1-9]\d*[A-Z]?$/.test(billCode)) invalidResponse();
+  if (!billCode || !BILL_CODE.test(billCode)) invalidResponse();
   return { session: `${parliament}-${session}`, billCode };
 }
 /** Parse actual picker options, excluding the all-sessions choice. */
@@ -284,11 +293,48 @@ function parseStage(row: JsonRecord, chamber: Stage['chamber']): Stage {
     endOfStageEvent: row.EndOfStageEvent == null ? null : record(row.EndOfStageEvent),
   };
 }
-/** Require one exact bill identity and preserve null versus empty collections. */
+/** Similar-bill records as list summaries, newest session first, then by bill code. */
+function parseSimilarBills(value: JsonValue | undefined): BillSummary[] | null {
+  return (
+    records(value)
+      ?.map((row) => ({
+        summary: parseBillSummary(row, 'dossier'),
+        parliament: requiredInteger(row.ParliamentNumber),
+        session: requiredInteger(row.SessionNumber),
+      }))
+      .sort(
+        (a, b) =>
+          b.parliament - a.parliament ||
+          b.session - a.session ||
+          compareBillCodes(a.summary.billCode, b.summary.billCode),
+      )
+      .map(({ summary }) => summary) ?? null
+  );
+}
+/**
+ * One reinstatement direction from its flag and bill code. A code the flag denies is contradictory
+ * evidence; a flag without a code keeps the code null.
+ */
+function reinstatementLink(
+  flag: JsonValue | undefined,
+  code: JsonValue | undefined,
+  session: string | null,
+): ReinstatementLink | null {
+  const reinstated = bool(flag);
+  const billCode = text(code);
+  if (billCode !== null && (!BILL_CODE.test(billCode) || reinstated === false)) invalidResponse();
+  return reinstated === true || billCode !== null ? { session, billCode } : null;
+}
+/**
+ * Require one exact bill identity and preserve null versus empty collections. Reinstatement
+ * sessions come from `index`, the official session index: the same Parliament's previous or next
+ * session when listed, else null, since reinstatement never crosses a dissolution.
+ */
 export function parseBillDossier(
   rows: JsonRecord[],
   session: string,
   billCode: string,
+  index: readonly LegisinfoSession[],
 ): BillDossier {
   const matching = rows.filter((row) => {
     const identity = billIdentity(row);
@@ -306,6 +352,12 @@ export function parseBillDossier(
   const chapter = scalar(row.StatuteChapter);
   const personId =
     row.SponsorPersonId == null ? null : String(requiredInteger(row.SponsorPersonId));
+  const parliament = requiredInteger(row.ParliamentNumber);
+  const sessionNumber = requiredInteger(row.SessionNumber);
+  const adjacent = (step: -1 | 1) =>
+    index.find(
+      (entry) => entry.parliament === parliament && entry.sessionNumber === sessionNumber + step,
+    )?.session ?? null;
   return {
     bill: parseBillSummary(row, 'dossier'),
     sponsor: {
@@ -320,6 +372,13 @@ export function parseBillDossier(
         records(stages?.SenateBillStages)?.map((stage) => parseStage(stage, 'Senate')) ?? null,
       royalAssent: records(stages?.RoyalAssent)?.map((stage) => parseStage(stage, null)) ?? null,
     },
+    interChamberMessages:
+      records(stages?.InterChamberMessages)?.map((message) => ({
+        name: bilingual(message, 'EventName'),
+        dateTime: text(message.Date),
+        chamber: reconcileChamber(message, 'Chamber'),
+        sittingNumber: scalar(message.MeetingNumber),
+      })) ?? null,
     divisions:
       records(row.HouseVoteDetails)?.map((division) => {
         const number = requiredInteger(division.DivisionNumber);
@@ -368,5 +427,18 @@ export function parseBillDossier(
         type: bilingual(reference, 'WebReferenceTypeName'),
         url: bilingual(reference, 'Url'),
       })) ?? null,
+    reinstatement: {
+      from: reinstatementLink(
+        row.DidReinstateFromPreviousSession,
+        row.ReinstatedFromBillNumberCode,
+        adjacent(-1),
+      ),
+      as: reinstatementLink(
+        row.DidReinstateInNextSession,
+        row.ReinstatedAsBillNumberCode,
+        adjacent(1),
+      ),
+    },
+    similarBills: parseSimilarBills(row.SimilarBills),
   };
 }

@@ -34,7 +34,7 @@ import {
 } from '@/domain/schemas.js';
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
 import { getOurCommonsService } from '@/services/ourcommons/index.js';
-import { fitResponsePage, formatResult, measuredTrailer } from './_format.js';
+import { formatResult, measuredTrailer } from './_format.js';
 
 /** Official division metadata, joined independently of participant filtering. */
 export const DivisionSchema = z
@@ -71,10 +71,7 @@ const enrichment = {
   shown: z.number().int().nonnegative().describe('Returned division count.'),
   cap: z.number().int().positive().describe('Effective page limit after the per-call cap.'),
   truncated: z.boolean().describe('Whether more matches remain.'),
-  notice: z
-    .string()
-    .optional()
-    .describe('Limit clamp, empty-result, past-end, or response-budget guidance.'),
+  notice: z.string().optional().describe('Limit clamp, empty-result, or past-end guidance.'),
 };
 
 /** Find divisions after applying every filter to the full selected session. */
@@ -104,7 +101,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
       'Literal subject substring; matching ignores case, accents, dash and quote styles, and repeated whitespace.',
     ),
     limit: LimitSchema.describe(
-      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
+      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice.',
     ),
     offset: OffsetSchema,
   }),
@@ -123,6 +120,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
     {
       reason: 'unsupported_vote_session',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Session with a zero or out-of-range number, or absent from the official division picker.',
       recovery:
         'Call canparl_list_reference with topic sessions and choose a session supporting House divisions.',
@@ -132,6 +130,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
     {
       reason: 'invalid_vote_filter',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Result or document category is unrecognized.',
       recovery:
         'Retry canparl_search_votes with a value the error names; canparl_list_reference topics vote_results and vote_document_types list results and categories.',
@@ -140,6 +139,7 @@ export const searchVotesTool = tool('canparl_search_votes', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'A date names no calendar day, or the bounds are reversed.',
       recovery:
         'Retry canparl_search_votes with real YYYY-MM-DD dates and dateFrom no later than dateTo.',
@@ -222,42 +222,30 @@ export const searchVotesTool = tool('canparl_search_votes', {
         );
       if (input.offset > 0 && input.offset >= page.total)
         notices.push('Retry canparl_search_votes with offset 0 for the same session and filters.');
-      const { result: response, enriched } = fitResponsePage(
-        page.items.length,
-        'canparl_search_votes',
-        (count, budgetNotice) => {
-          const selected = paginate(filtered, input.offset, count);
-          const notice = [...notices, ...(budgetNotice ? [budgetNotice] : [])].join(' ');
-          return {
-            result: {
-              session,
-              total: page.total,
-              divisions: selected.items,
-              pagination: { ...selected.pagination, limit: limit.value },
-              provenance,
-            },
-            enriched: {
-              appliedFilters: {
-                session,
-                billCode,
-                result: voteResult,
-                documentType,
-                dateFrom: dateFrom ?? null,
-                dateTo: dateTo ?? null,
-                subjectContains: input.subjectContains ?? null,
-              },
-              totalCount: page.total,
-              shown: selected.items.length,
-              cap: limit.value,
-              truncated: selected.pagination.hasMore,
-              ...(notice ? { notice } : {}),
-            },
-          };
+      ctx.enrich({
+        appliedFilters: {
+          session,
+          billCode,
+          result: voteResult,
+          documentType,
+          dateFrom: dateFrom ?? null,
+          dateTo: dateTo ?? null,
+          subjectContains: input.subjectContains ?? null,
         },
-      );
-      ctx.enrich(enriched);
+        totalCount: page.total,
+        shown: page.items.length,
+        cap: limit.value,
+        truncated: page.pagination.hasMore,
+        ...(notices.length ? { notice: notices.join(' ') } : {}),
+      });
       request.throwIfOuterAborted();
-      return response;
+      return {
+        session,
+        total: page.total,
+        divisions: page.items,
+        pagination: page.pagination,
+        provenance,
+      };
     } finally {
       request.dispose();
     }

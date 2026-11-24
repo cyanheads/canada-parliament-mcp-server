@@ -10,14 +10,14 @@ import { describe, expect, it } from 'vitest';
 import { type JsonRecord, JsonRecordSchema, JsonValueSchema } from '@/domain/schemas.js';
 import {
   encodeText,
-  fitResponsePage,
   formatResult,
   measuredTrailer,
-  RESPONSE_BUDGET,
+  OUTLINE_THRESHOLD_BYTES,
   renderUrl,
   renderValue,
   responseBytes,
 } from '@/mcp-server/tools/definitions/_format.js';
+import { expectLinearCpu } from '../fixtures/cpu-timing.js';
 import {
   decodeBun,
   decodeCommonMark,
@@ -298,7 +298,7 @@ describe('lossless CommonMark formatting', () => {
   });
 });
 
-describe('complete-response byte budget', () => {
+describe('complete-response measure and outline threshold', () => {
   const enrichment = {
     appliedFilters: z
       .object({ session: z.string().describe('S.'), code: z.string().nullable().describe('C.') })
@@ -365,8 +365,8 @@ describe('complete-response byte budget', () => {
     });
   const wire = (result: unknown) =>
     Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result }), 'utf8');
-  it('pins the shared budget at 24000 bytes', () => {
-    expect(RESPONSE_BUDGET).toBe(24_000);
+  it('pins the outline threshold at 24000 bytes', () => {
+    expect(OUTLINE_THRESHOLD_BYTES).toBe(24_000);
   });
   it.each(cases.map((_, index) => index))(
     'measures case %i exactly as the framework serializes it with every field trailer-rendered',
@@ -382,53 +382,6 @@ describe('complete-response byte budget', () => {
     const selected = cases[1] as Case;
     expect(responseBytes(selected.body, selected.enrichment)).not.toBe(wire(result));
   });
-  it.each([0, 1, 4])(
-    'fits %i available records using final enrichment and notices',
-    async (available) => {
-      const definition = tool('probe_fit', {
-        description: 'Return whole records under the shared complete-response byte budget.',
-        input: z.object({}),
-        output,
-        enrichment,
-        enrichmentTrailer: measuredTrailer(enrichment),
-        handler(_input, ctx) {
-          const selected = fitResponsePage(available, 'probe_fit', (count, notice) => ({
-            result: {
-              items: Array.from({ length: count }, (_, id) => ({ id, repeated: 'x'.repeat(4000) })),
-              meta: { nested: { labels: ['200', 200, null] } },
-              note: null,
-            },
-            enriched: {
-              appliedFilters: { session: '45-1', code: null },
-              shown: count,
-              truncated: count < available,
-              ...(notice ? { notice } : {}),
-            },
-          }));
-          ctx.enrich(selected.enriched);
-          return selected.result;
-        },
-        format: (result) => formatResult(result),
-      });
-      const result = await runToolContract(definition, {});
-      expect(result.isError).not.toBe(true);
-      expect(result.structuredContent).toMatchObject({
-        shown: available === 4 ? 2 : available,
-        truncated: available === 4,
-      });
-      expect(wire(result)).toBeLessThanOrEqual(24_000);
-      const data = JsonRecordSchema.parse(result.structuredContent);
-      roundTrip(
-        data,
-        result.content
-          .filter((block) => block.type === 'text')
-          .map((block) => block.text)
-          .join('\n'),
-      );
-      if (available === 4) expect(data.notice).toContain('24000-byte response budget');
-      else expect(data).not.toHaveProperty('notice');
-    },
-  );
 });
 
 /**
@@ -437,17 +390,6 @@ describe('complete-response byte budget', () => {
  */
 describe('encoder timing', { timeout: 0 }, () => {
   const sizes = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
-  /** Thread CPU microseconds per call, best of three, with equal total work at every size. */
-  function cpu(run: () => void, reps: number): number {
-    let best = Number.POSITIVE_INFINITY;
-    for (let trial = 0; trial < 3; trial++) {
-      const start = process.threadCpuUsage();
-      for (let i = 0; i < reps; i++) run();
-      const used = process.threadCpuUsage(start);
-      best = Math.min(best, (used.user + used.system) / reps);
-    }
-    return best;
-  }
   it.each([
     ['one long line ending in a break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
     ['breaks throughout', (n: number) => '  \r\n'.repeat(n / 4)],
@@ -459,18 +401,13 @@ describe('encoder timing', { timeout: 0 }, () => {
     ],
     ['escapes throughout', (n: number) => '*_[<&\\'.repeat(n / 6)],
   ])('stays linear on %s', (_shape, build) => {
-    const run = (input: string) => () => {
-      encodeText(input);
-      formatResult({ [input]: input });
-    };
-    cpu(run(build(sizes[0] as number)), 20);
-    const perCall: number[] = [];
-    for (const size of sizes) {
-      const input = build(size);
-      const single = cpu(run(input), 1);
-      expect(single, `${size} characters`).toBeLessThan(250_000);
-      perCall.push(cpu(run(input), Math.max(1, (sizes.at(-1) as number) / size)));
-    }
-    expect((perCall.at(-1) as number) / (perCall[0] as number)).toBeLessThan(256);
+    expectLinearCpu(
+      (input) => {
+        encodeText(input);
+        formatResult({ [input]: input });
+      },
+      build,
+      sizes,
+    );
   });
 });

@@ -176,6 +176,47 @@ describe('OpenParliament source records', () => {
     });
     expect(parseVote(vote)).toMatchObject({ date: null, subject: null, result: null });
   });
+  it('reads the vote detail tallies, keeping a real zero and an absent or null total as null', () => {
+    // The tallies of `/votes/45-1/196/` as published (captured 2026-11-23).
+    expect(
+      parseVote({
+        ...vote,
+        date: '2026-11-19',
+        description: { en: 'Budgetary policy', fr: 'Politique budgétaire' },
+        result: 'Passed',
+        yea_total: 162,
+        nay_total: 151,
+        paired_total: 16,
+      }),
+    ).toEqual({
+      session: '45-1',
+      number: 901,
+      date: '2026-11-19',
+      subject: 'Budgetary policy',
+      result: 'Passed',
+      yeas: 162,
+      nays: 151,
+      paired: 16,
+      url: 'https://openparliament.ca/votes/45-1/901/',
+    });
+    expect(parseVote({ ...vote, yea_total: 337, nay_total: 0, paired_total: null })).toMatchObject({
+      yeas: 337,
+      nays: 0,
+      paired: null,
+    });
+    expect(parseVote(vote)).toMatchObject({ yeas: null, nays: null, paired: null });
+  });
+  it.each([
+    ['yea_total', '162'],
+    ['nay_total', -1],
+    ['paired_total', 1.5],
+    ['yea_total', true],
+    ['nay_total', Number.MAX_SAFE_INTEGER + 1],
+  ])('rejects a malformed %s of %j without retry', (field, value) => {
+    expect(() => parseVote({ ...vote, [field]: value })).toThrow(
+      expect.objectContaining({ data: { field, retryable: false } }),
+    );
+  });
   it.each(['C-15A', 'C-333A', 'S-1001'])('reads split-bill or plain bill path %s', (code) => {
     expect(parseBill({ url: `/bills/37-1/${code}/`, session: '37-1', number: code })).toMatchObject(
       { session: '37-1', billCode: code, url: `https://openparliament.ca/bills/37-1/${code}/` },

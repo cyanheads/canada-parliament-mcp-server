@@ -6,7 +6,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BillSummarySchema, getBillTool } from '@/mcp-server/tools/definitions/get-bill.tool.js';
-import { parseBillDossier, parseBillRecords } from '@/services/legisinfo/parsing.js';
+import { parseBillDossier, parseBillRecords, parseSessions } from '@/services/legisinfo/parsing.js';
 import {
   assertDomainParity,
   assertError,
@@ -31,6 +31,7 @@ const sectionNames = [
   'stages.house',
   'stages.senate',
   'stages.royalAssent',
+  'interChamberMessages',
   'divisions',
   'senateVoteDetails',
   'publications',
@@ -41,17 +42,35 @@ const sectionNames = [
   'notes.fr',
   'milestones',
   'webReferences',
+  'reinstatement',
+  'similarBills',
+];
+/** Sessions the captured dossiers' picker advertises: each fixture's own and its reinstatement counterparts. */
+const realSessions = [
+  '45-1',
+  '44-1',
+  '43-2',
+  '43-1',
+  '42-1',
+  '41-2',
+  '41-1',
+  '37-1',
+  '35-2',
+  '35-1',
 ];
 type RealDossier = Parameters<typeof realDossier>[0];
 /** Identity and production parse of a captured dossier, the oracle for its tool pages. */
 function realBill(name: RealDossier) {
   const [parliament, number, prefix, code] = name.split('-');
   const session = `${parliament}-${number}`;
-  const billCode = `${prefix?.toUpperCase()}-${code}`;
+  const billCode = `${prefix?.toUpperCase()}-${code?.toUpperCase()}`;
+  const index = parseSessions(
+    realSessions.map((value) => `<a data-input="parlsession" data-value="${value}"></a>`).join(''),
+  );
   return {
     session,
     billCode,
-    parsed: parseBillDossier(parseBillRecords(realDossier(name)), session, billCode),
+    parsed: parseBillDossier(parseBillRecords(realDossier(name)), session, billCode, index),
   };
 }
 /** Values the sparse `rawBill()` dossier carries; every section not listed here is null. */
@@ -65,10 +84,8 @@ const sparseSections: Record<string, unknown> = {
     senateSecondReading: null,
     senateThirdReading: null,
   },
+  reinstatement: { from: null, as: null },
 };
-const budgetStop = (count: number) =>
-  `The 24000-byte response budget ended this page after ${count} ${count === 1 ? 'record' : 'records'}; call canparl_get_bill with pagination.nextOffset and the same section to continue.`;
-
 const prose = ' Synthetic\rtext\nwith\r\n``` fences &amp; [links](https://evil.test) ';
 const decision = {
   'nested\r\nkey': [
@@ -174,7 +191,7 @@ describe('canparl_get_bill production contract', () => {
   function routeReal(name: RealDossier) {
     const bill = realBill(name);
     http.reset();
-    sessions(http, ['45-1', '44-1', '42-1', '41-1', '35-1']);
+    sessions(http, realSessions);
     http.route({
       match: detail(bill.billCode, bill.session),
       respond: new Response(realDossier(name)),
@@ -196,6 +213,7 @@ describe('canparl_get_bill production contract', () => {
       Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, result: overview })),
     ).toBeLessThanOrEqual(24_000);
     const rebuilt: unknown[] = [];
+    const sizes: number[] = [];
     let offset = 0;
     do {
       const reply = await call({
@@ -207,14 +225,42 @@ describe('canparl_get_bill production contract', () => {
       });
       const page = check(reply);
       expect(page.kind).toBe('section');
-      expect(page.senateVoteDetails?.length).toBeGreaterThan(0);
+      expect(page).not.toHaveProperty('disclosure');
+      sizes.push(page.senateVoteDetails?.length ?? 0);
       rebuilt.push(...(page.senateVoteDetails ?? []));
-      expect(
-        Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, result: reply })),
-      ).toBeLessThanOrEqual(24_000);
       offset = page.pagination?.nextOffset ?? -1;
     } while (offset !== -1);
+    expect(sizes).toEqual([3, 3, 1]);
     expect(rebuilt).toEqual(records);
+  });
+  it('returns the full dossier at or below 24000 serialized bytes and the outline above it', async () => {
+    let probes = 0;
+    /** The unselected response for a dossier whose one record carries `padding` characters. */
+    const probe = (padding: number) => {
+      const code = `C-${1000 + ++probes}`;
+      http.route({
+        match: detail(code),
+        respond: Response.json([
+          rawBill(code, { SenateVoteDetails: [{ text: 'x'.repeat(padding) }] }),
+        ]),
+      });
+      return call({ session: '45-1', billCode: code });
+    };
+    const kind = (reply: Awaited<ReturnType<typeof call>>) =>
+      (reply.structuredContent as { kind?: string }).kind;
+    let full = 0;
+    let outlined = 24_000;
+    while (outlined - full > 1) {
+      const middle = Math.floor((full + outlined) / 2);
+      if (kind(await probe(middle)) === undefined) full = middle;
+      else outlined = middle;
+    }
+    const largest = await probe(full);
+    expect(check(largest).kind).toBeUndefined();
+    // One more padding character adds one byte to each surface, crossing the threshold.
+    expect(wireBytes(largest)).toBeGreaterThan(23_998);
+    expect(wireBytes(largest)).toBeLessThanOrEqual(24_000);
+    expect(check(await probe(outlined))).toMatchObject({ kind: 'outline' });
   });
   it('treats a blank section as unset and trims a selected section', async () => {
     http.route({ match: detail(), respond: Response.json([rawBill()]) });
@@ -229,10 +275,12 @@ describe('canparl_get_bill production contract', () => {
     'stages.house',
     'stages.senate',
     'stages.royalAssent',
+    'interChamberMessages',
     'divisions',
     'senateVoteDetails',
     'publications',
     'webReferences',
+    'similarBills',
   ])('keeps empty and past-end pages explicit for %s', async (section) => {
     http.route({
       match: detail(),
@@ -242,11 +290,13 @@ describe('canparl_get_bill production contract', () => {
             HouseBillStages: [stage(1), stage(2)],
             SenateBillStages: [],
             RoyalAssent: [],
+            InterChamberMessages: [],
           },
           HouseVoteDetails: [],
           SenateVoteDetails: [],
           Publications: [],
           WebReferences: [],
+          SimilarBills: [],
         }),
       ]),
     });
@@ -274,18 +324,46 @@ describe('canparl_get_bill production contract', () => {
       });
     },
   );
-  it('returns an oversized indivisible nested record whole with disclosure', async () => {
+  it('returns an oversized nested record whole without a size disclosure', async () => {
     const record = { nested: { text: ' &é'.repeat(9000) } };
     http.route({
       match: detail(),
       respond: Response.json([rawBill('C-901', { SenateVoteDetails: [record] })]),
     });
-    const result = check(
-      await call({ session: '45-1', billCode: 'C-901', section: 'senateVoteDetails', limit: 1 }),
-    );
+    const reply = await call({
+      session: '45-1',
+      billCode: 'C-901',
+      section: 'senateVoteDetails',
+      limit: 1,
+    });
+    const result = check(reply);
     expect(result.senateVoteDetails).toEqual([record]);
-    expect(result.disclosure).toContain('indivisible');
+    expect(result).not.toHaveProperty('disclosure');
     expect(result.pagination).toMatchObject({ total: 1, nextOffset: null });
+    expect(wireBytes(reply)).toBeGreaterThan(24_000);
+  });
+  it('returns every stage at the default limit, an oversized one included, without disclosure', async () => {
+    const remarks = (size: number) => ({ closed: false, remarks: 'é'.repeat(size) });
+    const stages = [
+      { ...stage(1), EndOfStageEvent: remarks(15_000) },
+      ...[2, 3, 4, 5].map((id) => ({ ...stage(id), EndOfStageEvent: remarks(3_000) })),
+    ];
+    http.route({
+      match: detail(),
+      respond: Response.json([
+        rawBill('C-901', {
+          BillStages: { HouseBillStages: stages, SenateBillStages: [], RoyalAssent: [] },
+        }),
+      ]),
+    });
+    const reply = await call({ session: '45-1', billCode: 'C-901', section: 'stages.house' });
+    const page = check(reply);
+    expect(page.stages?.house?.map((record) => record.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(page.stages?.house?.[0]?.endOfStageEvent).toEqual(remarks(15_000));
+    expect(page.pagination).toMatchObject({ limit: 20, total: 5, nextOffset: null });
+    expect(page).not.toHaveProperty('disclosure');
+    expect(reply.structuredContent).not.toHaveProperty('notice');
+    expect(wireBytes(reply)).toBeGreaterThan(24_000);
   });
   it('pages deep chamber stages by whole records and retains the requested cap', async () => {
     http.route({
@@ -346,11 +424,10 @@ describe('canparl_get_bill production contract', () => {
       expect(restReply.structuredContent).toMatchObject({ notice });
     },
   );
-  it('measures the clamp notice inside the 24000-byte section budget', async () => {
-    // The large record leaves room for a few small ones beside the clamp notice and stop disclosure.
+  it('returns the whole clamped collection page past 24000 bytes', async () => {
     const records = [
       { big: 'x'.repeat(10_300) },
-      ...Array.from({ length: 149 }, (_, n) => ({ n: n + 1 })),
+      ...Array.from({ length: 149 }, (_, n) => ({ n: n + 1, text: 'é'.repeat(60) })),
     ];
     http.route({
       match: detail(),
@@ -363,37 +440,32 @@ describe('canparl_get_bill production contract', () => {
       limit: 150,
     });
     const page = check(reply);
-    const count = page.senateVoteDetails?.length ?? 0;
-    expect(count).toBeGreaterThan(1);
-    expect(count).toBeLessThan(100);
-    expect(page.senateVoteDetails).toEqual(records.slice(0, count));
-    expect(page.pagination).toMatchObject({ limit: 100, total: 150, nextOffset: count });
+    expect(page.senateVoteDetails).toEqual(records.slice(0, 100));
+    expect(page.pagination).toMatchObject({ limit: 100, total: 150, nextOffset: 100 });
     expect(reply.structuredContent).toMatchObject({
       notice: 'limit 150 exceeds the per-call maximum of 100; returned up to 100.',
-      disclosure: budgetStop(count),
     });
-    expect(wireBytes(reply)).toBeLessThanOrEqual(24_000);
+    expect(page).not.toHaveProperty('disclosure');
+    expect(wireBytes(reply)).toBeGreaterThan(24_000);
   });
-  it('discloses a response-budget stop below the effective limit, measured inside the budget', async () => {
+  it('returns all 23 web references of 42-1 C-86 in one page at the clamped limit', async () => {
     const { parsed, ...bill } = routeReal('42-1-c-86');
     const reply = await call({ ...bill, section: 'webReferences', limit: 10_000 });
     const page = check(reply);
-    const count = page.webReferences?.length ?? 0;
-    expect(count).toBeGreaterThan(0);
-    expect(count).toBeLessThan(23);
-    expect(page.webReferences).toEqual(parsed.webReferences?.slice(0, count));
+    expect(page.webReferences).toEqual(parsed.webReferences);
+    expect(page.webReferences).toHaveLength(23);
     expect(page.pagination).toEqual({
       section: 'webReferences',
       offset: 0,
       limit: 100,
       total: 23,
-      nextOffset: count,
+      nextOffset: null,
     });
     expect(reply.structuredContent).toMatchObject({
       notice: 'limit 10000 exceeds the per-call maximum of 100; returned up to 100.',
-      disclosure: budgetStop(count),
     });
-    expect(wireBytes(reply)).toBeLessThanOrEqual(24_000);
+    expect(page).not.toHaveProperty('disclosure');
+    expect(wireBytes(reply)).toBeGreaterThan(24_000);
   });
   it.each([
     { offset: 1 },
@@ -406,6 +478,8 @@ describe('canparl_get_bill production contract', () => {
     { section: 'notes.en', offset: 1 },
     { section: 'notes.fr', limit: 1 },
     { section: 'milestones', offset: 2 },
+    { section: 'reinstatement', offset: 1 },
+    { section: 'reinstatement', limit: 5 },
   ])('rejects incompatible selection %j with recovery', async (selection) => {
     http.route({ match: detail(), respond: Response.json([rawBill()]) });
     const reply = await call({ session: '45-1', billCode: 'C-901', ...selection });
@@ -570,6 +644,7 @@ describe('canparl_get_bill production contract', () => {
           endOfStageEvent: null,
         })),
       },
+      interChamberMessages: null,
       divisions: [71, 72].map((number) => ({
         session: '45-1',
         number,
@@ -620,6 +695,8 @@ describe('canparl_get_bill production contract', () => {
           url: { en: 'Parliament of Canada. « 7. Section 8 ». 2015.', fr: null },
         },
       ],
+      reinstatement: { from: null, as: null },
+      similarBills: null,
       provenance: [
         {
           source: 'legisinfo',
@@ -644,6 +721,89 @@ describe('canparl_get_bill production contract', () => {
     });
     const result = check(await call({ session: '45-1', billCode: 'C-901', section: 'statute' }));
     expect(result.bill.royalAssentDate).toBe('2026-03-26T14:50:00Z');
+  });
+  it('preserves every message, similar-bill, and reinstatement leaf of a full dossier on both surfaces', async () => {
+    http.route({
+      match: detail(),
+      respond: Response.json([
+        rawBill('C-901', {
+          BillStages: {
+            InterChamberMessages: [
+              {
+                EventNameEn: prose,
+                EventNameFr: 'Message envoyé',
+                EventName: prose,
+                Date: '2026-01-04T00:00:00.5',
+                ParliamentNumber: 45,
+                SessionNumber: 1,
+                MeetingNumber: '12',
+                ChamberOrganizationId: 2,
+              },
+              { EventNameEn: 'Concurrence', MeetingNumber: 13, ChamberOrganizationId: 1 },
+            ],
+          },
+          SimilarBills: [
+            rawBill('S-12', {
+              ParliamentNumber: 44,
+              SessionNumber: 1,
+              OriginatingChamberNameEn: 'Senate',
+              LatestCompletedMajorStageChamberNameEn: 'Senate',
+              LatestCompletedMajorStageChamberOrganizationId: 2,
+              ReceivedRoyalAssentDateTime: '2024-06-20T15:00:00',
+            }),
+            rawBill('C-900', { ParliamentNumber: 44, SessionNumber: 2 }),
+          ],
+          DidReinstateFromPreviousSession: true,
+          ReinstatedFromBillNumberCode: 'C-900',
+          DidReinstateInNextSession: false,
+          ReinstatedAsBillNumberCode: null,
+        }),
+      ]),
+    });
+    const full = check(await call());
+    expect(full.kind).toBeUndefined();
+    expect(full.interChamberMessages).toEqual([
+      {
+        name: { en: prose, fr: 'Message envoyé' },
+        dateTime: '2026-01-04T00:00:00.5',
+        chamber: 'Senate',
+        sittingNumber: '12',
+      },
+      {
+        name: { en: 'Concurrence', fr: null },
+        dateTime: null,
+        chamber: 'House',
+        sittingNumber: '13',
+      },
+    ]);
+    // The index lists no 45-0, so the predecessor's session stays unknown.
+    expect(full.reinstatement).toEqual({ from: { session: null, billCode: 'C-900' }, as: null });
+    const summary = {
+      longTitle: { en: 'Synthetic marine act', fr: 'Loi synthétique sur la mer' },
+      shortTitle: { en: 'Marine Act', fr: 'Loi marine' },
+      billType: 'Government Bill',
+      status: 'At second reading in the House of Commons',
+    };
+    expect(full.similarBills).toEqual([
+      {
+        session: '44-2',
+        billCode: 'C-900',
+        ...summary,
+        originatingChamber: 'House',
+        latestMajorStage: { name: 'First reading', chamber: 'House' },
+        royalAssentDate: null,
+        url: 'https://www.parl.ca/legisinfo/en/bill/44-2/c-900',
+      },
+      {
+        session: '44-1',
+        billCode: 'S-12',
+        ...summary,
+        originatingChamber: 'Senate',
+        latestMajorStage: { name: 'First reading', chamber: 'Senate' },
+        royalAssentDate: '2024-06-20T19:00:00Z',
+        url: 'https://www.parl.ca/legisinfo/en/bill/44-1/s-12',
+      },
+    ]);
   });
   it('starts a notes block that follows inline text on a new paragraph on both surfaces', async () => {
     http.route({
@@ -878,7 +1038,7 @@ describe('canparl_get_bill production contract', () => {
     );
     expect(http.calls).toHaveLength(0);
   });
-  it('outlines 45-1 C-15 with its sponsor, statute, and milestones inline and all 14 sections', async () => {
+  it('outlines 45-1 C-15 with its sponsor, statute, milestones, and reinstatement inline and all 17 sections', async () => {
     const { parsed, ...bill } = routeReal('45-1-c-15');
     const reply = await call(bill);
     const outline = check(reply);
@@ -889,11 +1049,13 @@ describe('canparl_get_bill production contract', () => {
         'sponsor',
         'statute',
         'milestones',
+        'reinstatement',
         'provenance',
         'sections',
         'disclosure',
       ].sort(),
     );
+    expect(outline.reinstatement).toEqual({ from: null, as: null });
     expect(outline).toMatchObject({
       kind: 'outline',
       sponsor: {
@@ -907,6 +1069,8 @@ describe('canparl_get_bill production contract', () => {
       },
       statute: { year: 2026, chapter: '3', citation: 'S.C. 2026, c. 3' },
       milestones: parsed.milestones,
+      disclosure:
+        'Dossier exceeds the 24000-byte outline threshold. Re-call with one section selector; collections use offset and limit. No records have been discarded.',
     });
     expect(Object.values(outline.milestones ?? {})).not.toContain(null);
     expect(outline.sections).toEqual(
@@ -918,7 +1082,7 @@ describe('canparl_get_bill production contract', () => {
     expect(wireBytes(reply)).toBeLessThanOrEqual(24_000);
     expect(http.calls).toHaveLength(2);
   });
-  it('returns 44-1 C-69 summary.en alone and whole, with the oversized-section disclosure', async () => {
+  it('returns 44-1 C-69 summary.en alone and whole, without a size disclosure', async () => {
     const { parsed, ...bill } = routeReal('44-1-c-69');
     const reply = await call({ ...bill, section: 'summary.en' });
     const page = check(reply);
@@ -929,8 +1093,6 @@ describe('canparl_get_bill production contract', () => {
       provenance: expect.any(Array),
       summary: { en: parsed.summary.en },
       pagination: { section: 'summary.en', offset: 0, limit: 20, total: null, nextOffset: null },
-      disclosure:
-        'One indivisible record or scalar section exceeds the serialized response budget; returned whole without truncation.',
     });
     expect(parsed.summary.en?.length).toBeGreaterThan(28_000);
     expect(wireBytes(reply)).toBeGreaterThan(24_000);
@@ -959,7 +1121,7 @@ describe('canparl_get_bill production contract', () => {
     expect(page.disclosure).toBeUndefined();
   });
   // Each page decodes content[] through two CommonMark parsers, which runs past 5 s under load.
-  it('pages all 23 web references of 42-1 C-86 by whole records under the byte budget', async () => {
+  it('pages all 23 web references of 42-1 C-86 by whole records at the default limit', async () => {
     const { parsed, ...bill } = routeReal('42-1-c-86');
     expect(parsed.webReferences).toHaveLength(23);
     const rebuilt: unknown[] = [];
@@ -969,19 +1131,13 @@ describe('canparl_get_bill production contract', () => {
       const reply = await call({ ...bill, section: 'webReferences', offset });
       const page = check(reply);
       expect(page).toMatchObject({ totalCount: 23, pagination: { offset, limit: 20, total: 23 } });
-      const shown = page.webReferences?.length ?? 0;
-      // A page shorter than the effective limit and the remaining records is a budget stop.
-      expect(page.disclosure).toBe(
-        shown < Math.min(20, 23 - offset) ? budgetStop(shown) : undefined,
-      );
-      expect(wireBytes(reply)).toBeLessThanOrEqual(24_000);
-      sizes.push(shown);
+      expect(page).not.toHaveProperty('disclosure');
+      sizes.push(page.webReferences?.length ?? 0);
       rebuilt.push(...(page.webReferences ?? []));
       offset = page.pagination?.nextOffset ?? -1;
     } while (offset !== -1);
     expect(rebuilt).toEqual(parsed.webReferences);
-    expect(sizes.length).toBeGreaterThan(1);
-    expect(Math.min(...sizes)).toBeGreaterThan(0);
+    expect(sizes).toEqual([20, 3]);
     const past = check(await call({ ...bill, section: 'webReferences', offset: 23 }));
     expect(past).toMatchObject({
       webReferences: [],
@@ -1012,6 +1168,220 @@ describe('canparl_get_bill production contract', () => {
     });
     const references = check(await call({ ...bill, section: 'webReferences' }));
     expect(references).toMatchObject({ webReferences: [], disclosure: 'Section has no records.' });
+  });
+  it('outlines 41-2 C-201 now that its similar bills cross the threshold, counting all 17 sections', async () => {
+    const bill = routeReal('41-2-c-201');
+    const reply = await call({ session: bill.session, billCode: bill.billCode });
+    const outline = check(reply);
+    expect(outline).toMatchObject({
+      kind: 'outline',
+      reinstatement: { from: { session: '41-1', billCode: 'C-201' }, as: null },
+      disclosure:
+        'Dossier exceeds the 24000-byte outline threshold. Re-call with one section selector; collections use offset and limit. No records have been discarded.',
+    });
+    const counts: Record<string, number> = {
+      'stages.house': 5,
+      'stages.senate': 3,
+      'stages.royalAssent': 0,
+      interChamberMessages: 0,
+      divisions: 1,
+      senateVoteDetails: 0,
+      publications: 1,
+      webReferences: 0,
+      similarBills: 6,
+    };
+    expect(outline.sections).toEqual(
+      sectionNames.map((name) => ({ name, count: counts[name] ?? null })),
+    );
+    expect(wireBytes(reply)).toBeLessThanOrEqual(24_000);
+    expect(http.calls).toHaveLength(2);
+  });
+  it('pages the six similar bills of 41-2 C-201 as search rows, newest session first', async () => {
+    const bill = routeReal('41-2-c-201');
+    const select = async (offset: number) =>
+      check(
+        await call({
+          session: bill.session,
+          billCode: bill.billCode,
+          section: 'similarBills',
+          offset,
+          limit: 4,
+        }),
+      );
+    const first = await select(0);
+    const second = await select(4);
+    expect([first.pagination, second.pagination]).toEqual([
+      { section: 'similarBills', offset: 0, limit: 4, total: 6, nextOffset: 4 },
+      { section: 'similarBills', offset: 4, limit: 4, total: 6, nextOffset: null },
+    ]);
+    const rows = [...(first.similarBills ?? []), ...(second.similarBills ?? [])];
+    for (const row of rows) expect(BillSummarySchema.parse(row)).toEqual(row);
+    expect(rows.map(({ session, billCode, url }) => [session, billCode, url])).toEqual([
+      ['41-1', 'C-201', 'https://www.parl.ca/legisinfo/en/bill/41-1/c-201'],
+      ['40-3', 'C-227', 'https://www.parl.ca/legisinfo/en/bill/40-3/c-227'],
+      ['40-2', 'C-227', 'https://www.parl.ca/legisinfo/en/bill/40-2/c-227'],
+      ['40-1', 'C-227', 'https://www.parl.ca/legisinfo/en/bill/40-1/c-227'],
+      ['39-2', 'C-390', 'https://www.parl.ca/legisinfo/en/bill/39-2/c-390'],
+      ['39-1', 'C-390', 'https://www.parl.ca/legisinfo/en/bill/39-1/c-390'],
+    ]);
+    expect(await select(6)).toMatchObject({
+      similarBills: [],
+      pagination: { offset: 6, total: 6, nextOffset: null },
+      disclosure: 'Offset is past the end of this section.',
+    });
+    expect(http.calls).toHaveLength(2);
+  }, 20_000);
+  it.each([
+    ['41-1-c-201', { from: null, as: { session: '41-2', billCode: 'C-201' } }],
+    ['43-2-c-218', { from: { session: '43-1', billCode: 'C-218' }, as: null }],
+  ] as const)('returns the reinstatement section of %s alone', async (name, reinstatement) => {
+    const { parsed, ...bill } = routeReal(name);
+    expect(check(await call({ ...bill, section: 'reinstatement' }))).toEqual({
+      kind: 'section',
+      totalCount: null,
+      bill: parsed.bill,
+      provenance: expect.any(Array),
+      reinstatement,
+      pagination: { section: 'reinstatement', offset: 0, limit: 20, total: null, nextOffset: null },
+    });
+  });
+  it('returns 41-1 C-201 whole with its successor, five similar bills, and no messages on both surfaces', async () => {
+    const { parsed, ...bill } = routeReal('41-1-c-201');
+    const full = check(await call(bill));
+    expect(full.kind).toBeUndefined();
+    expect(full).toMatchObject({
+      reinstatement: { from: null, as: { session: '41-2', billCode: 'C-201' } },
+      interChamberMessages: [],
+      similarBills: parsed.similarBills,
+    });
+    expect(full.similarBills?.map(({ session, billCode }) => `${session} ${billCode}`)).toEqual([
+      '40-3 C-227',
+      '40-2 C-227',
+      '40-1 C-227',
+      '39-2 C-390',
+      '39-1 C-390',
+    ]);
+  });
+  it('counts the six 45-1 C-9 messages in its outline and returns them whole in source order', async () => {
+    const bill = routeReal('45-1-c-9');
+    const outline = check(await call({ session: bill.session, billCode: bill.billCode }));
+    expect(outline.kind).toBe('outline');
+    expect(outline.sections).toEqual(
+      expect.arrayContaining([
+        { name: 'interChamberMessages', count: 6 },
+        { name: 'similarBills', count: null },
+      ]),
+    );
+    const page = check(
+      await call({
+        session: bill.session,
+        billCode: bill.billCode,
+        section: 'interChamberMessages',
+      }),
+    );
+    expect(page.pagination).toEqual({
+      section: 'interChamberMessages',
+      offset: 0,
+      limit: 20,
+      total: 6,
+      nextOffset: null,
+    });
+    expect(page.interChamberMessages?.[0]).toEqual({
+      name: {
+        en: 'Message sent to the House of Commons',
+        fr: 'Message envoyé à la Chambre des communes',
+      },
+      dateTime: '2026-06-04T22:30:00',
+      chamber: 'Senate',
+      sittingNumber: '79',
+    });
+    expect(page.interChamberMessages?.[5]).toMatchObject({
+      dateTime: '2026-06-17T15:30:00',
+      chamber: 'House',
+      sittingNumber: '138',
+    });
+    expect(
+      check(
+        await call({ session: bill.session, billCode: bill.billCode, section: 'similarBills' }),
+      ),
+    ).toMatchObject({
+      totalCount: null,
+      similarBills: null,
+      disclosure: 'Section is unavailable in the official source.',
+    });
+  });
+  it('lists the same-session split parent of 37-1 C-15A as its one similar bill', async () => {
+    const bill = routeReal('37-1-c-15a');
+    const page = check(
+      await call({ session: bill.session, billCode: bill.billCode, section: 'similarBills' }),
+    );
+    expect(page.similarBills).toEqual([
+      {
+        session: '37-1',
+        billCode: 'C-15',
+        longTitle: {
+          en: 'An Act to amend the Criminal Code and to amend other Acts',
+          fr: expect.any(String),
+        },
+        shortTitle: { en: 'Criminal Law Amendment Act, 2001', fr: expect.any(String) },
+        billType: 'House Government Bill',
+        originatingChamber: 'House',
+        status: 'At report stage in the House of Commons',
+        latestMajorStage: { name: 'Second reading', chamber: 'House' },
+        royalAssentDate: null,
+        url: 'https://www.parl.ca/legisinfo/en/bill/37-1/c-15',
+      },
+    ]);
+  });
+  it('keeps 43-2 S-230 messages empty and 35-2 C-2 messages unavailable', async () => {
+    const senate = routeReal('43-2-s-230');
+    expect(
+      check(
+        await call({
+          session: senate.session,
+          billCode: senate.billCode,
+          section: 'interChamberMessages',
+        }),
+      ),
+    ).toMatchObject({
+      interChamberMessages: [],
+      pagination: { total: 0, nextOffset: null },
+      disclosure: 'Section has no records.',
+    });
+    const early = routeReal('35-2-c-2');
+    const reply = await call({ session: early.session, billCode: early.billCode });
+    const full = check(reply);
+    expect(full.kind).toBeUndefined();
+    expect(full).toMatchObject({
+      interChamberMessages: null,
+      similarBills: null,
+      reinstatement: { from: null, as: null },
+    });
+    expect(reply.structuredContent).toMatchObject({
+      notice:
+        'This early session provides basic bill coverage; unavailable dossier fields remain null.',
+    });
+  });
+  it('fails a message from an unknown chamber as an invalid official response without retrying', async () => {
+    http.route({
+      match: detail(),
+      respond: Response.json([
+        rawBill('C-901', {
+          BillStages: {
+            InterChamberMessages: [{ EventNameEn: 'Message', ChamberOrganizationId: 3 }],
+          },
+        }),
+      ]),
+    });
+    const reply = await call();
+    expect(reply.isError).toBe(true);
+    expect(reply.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.SerializationError,
+        data: { reason: 'upstream_response_invalid', retryable: false },
+      },
+    });
+    expect(http.calls).toHaveLength(2);
   });
   it('states the Ottawa source clock and UTC shape for assent and milestones', () => {
     expect(BillSummarySchema.shape.royalAssentDate.description).toBe(

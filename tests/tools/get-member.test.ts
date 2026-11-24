@@ -303,6 +303,7 @@ describe('canparl_get_member production contract', () => {
         status: 'available',
         offset: 7,
         limit: 2,
+        total: null,
         nextOffset: 12,
         hasMore: true,
         failure: null,
@@ -319,6 +320,7 @@ describe('canparl_get_member production contract', () => {
         status: 'available',
         offset: 9,
         limit: 2,
+        total: null,
         nextOffset: 15,
         items: [
           { number: 2, subject: 'Motion\n[subject]', date: '2026-10-19', ballot: 'Yes' },
@@ -332,13 +334,17 @@ describe('canparl_get_member production contract', () => {
   });
   const someUnavailable =
     'Some optional enrichment is unavailable; inspect unavailable and section failure metadata before drawing historical conclusions.';
-  const noActivity =
-    'No activity was returned by this OpenParliament page; use canparl_search_bills or canparl_search_votes to inspect official records.';
-  const pastEnd = 'Retry canparl_get_member with billsOffset 0 or votesOffset 0 for that section.';
+  const noBills =
+    'No sponsored bills were returned by this OpenParliament page; use canparl_search_bills to inspect official bill records.';
+  const noBallots =
+    'No ballots were returned by this OpenParliament page; use canparl_search_votes to inspect official divisions.';
+  const billsPastEnd = 'Retry canparl_get_member with billsOffset 0 for sponsored bills.';
+  const votesPastEnd = 'Retry canparl_get_member with votesOffset 0 for ballots.';
   it.each<[number, number, string]>([
-    [0, 0, `${someUnavailable} ${noActivity}`],
-    [20, 20, `${someUnavailable} ${pastEnd}`],
-    [20, 0, `${someUnavailable} ${noActivity} ${pastEnd}`],
+    [0, 0, `${someUnavailable} ${noBills} ${noBallots}`],
+    [20, 20, `${someUnavailable} ${billsPastEnd} ${votesPastEnd}`],
+    [20, 0, `${someUnavailable} ${billsPastEnd} ${noBallots}`],
+    [0, 20, `${someUnavailable} ${noBills} ${votesPastEnd}`],
   ])(
     'keeps truly empty activity distinct from unavailable at billsOffset %i and votesOffset %i',
     async (billsOffset, votesOffset, notice) => {
@@ -350,12 +356,32 @@ describe('canparl_get_member production contract', () => {
         getMemberTool,
       );
       expect(data).toMatchObject({
-        sponsoredBills: { status: 'available', items: [], failure: null, nextOffset: null },
-        recentVotes: { status: 'available', items: [], failure: null },
+        sponsoredBills: {
+          status: 'available',
+          items: [],
+          total: null,
+          failure: null,
+          nextOffset: null,
+        },
+        recentVotes: { status: 'available', items: [], total: null, failure: null },
       });
       expect(data.notice).toBe(notice);
     },
   );
+  it('names sponsored bills, not ballots, when only the bills page of an official member is empty', async () => {
+    roster([rawPerson(110572)]);
+    candidates([{ name: 'River Example', url: actor }]);
+    json(http, actor, profile({ other_info: { parl_mp_id: ['110572'] }, image: null }));
+    page(http, '/bills/', { limit: 5, offset: 0, sponsor_politician: actor }, []);
+    memberVotes('110572', realMemberVotes('110572-latest'));
+    const data = parity(await call({ personId: '110572' }), getMemberTool);
+    expect(data).toMatchObject({
+      sponsoredBills: { status: 'available', items: [], total: null },
+      recentVotes: { status: 'available', total: 196, nextOffset: 10 },
+      unavailable: [],
+    });
+    expect(data.notice).toBe(noBills);
+  });
   it.each(['bills', 'votes'])(
     'discards a whole partially hydrated %s section while preserving the other',
     async (section) => {
@@ -436,13 +462,13 @@ describe('canparl_get_member production contract', () => {
     ]);
   });
   it.each([
-    [6, 11],
+    [6, 150],
     [10_000, 10_000],
   ])(
-    'clamps sponsoredBills %i and recentVotes %i to 5 and 10 rows before any request',
+    'clamps sponsoredBills %i to 5 before any request and official recentVotes %i to 100',
     async (sponsoredBills, recentVotes) => {
-      json(http, actor, profile({ image: null, other_info: { parl_mp_id: ['2897'] } }));
-      roster([rawPerson(2897)]);
+      json(http, actor, profile({ image: null, other_info: { parl_mp_id: ['110572'] } }));
+      roster([rawPerson(110572)]);
       const billsPage = page(
         http,
         '/bills/',
@@ -451,23 +477,29 @@ describe('canparl_get_member production contract', () => {
         5,
       );
       for (let i = 1; i <= 5; i++) json(http, `/bills/45-1/C-${i}/`, bill(i, true));
-      memberVotes('2897', realMemberVotes('2897-45-1'));
+      memberVotes('110572', realMemberVotes('110572-latest'));
       const data = parity(await call({ slug: actor, sponsoredBills, recentVotes }), getMemberTool);
       expect(data).toMatchObject({
         sponsoredBills: { status: 'available', limit: 5, nextOffset: 5, hasMore: true },
-        recentVotes: { status: 'available', limit: 10, nextOffset: 10, hasMore: true },
-        appliedFilters: { sponsoredBills: 5, billsOffset: 0, recentVotes: 10, votesOffset: 0 },
-        shown: { sponsoredBills: 5, recentVotes: 10 },
-        cap: { sponsoredBills: 5, recentVotes: 10 },
+        recentVotes: {
+          status: 'available',
+          limit: 100,
+          total: 196,
+          nextOffset: 100,
+          hasMore: true,
+        },
+        appliedFilters: { sponsoredBills: 5, billsOffset: 0, recentVotes: 100, votesOffset: 0 },
+        shown: { sponsoredBills: 5, recentVotes: 100 },
+        cap: { sponsoredBills: 5, recentVotes: 100 },
         truncated: { sponsoredBills: true, recentVotes: true },
-        notice: `sponsoredBills ${sponsoredBills} exceeds the per-call maximum of 5; returned up to 5. recentVotes ${recentVotes} exceeds the per-call maximum of 10; returned up to 10.`,
+        notice: `sponsoredBills ${sponsoredBills} exceeds the per-call maximum of 5; returned up to 5. recentVotes ${recentVotes} exceeds the per-call maximum of 100; returned up to 100.`,
       });
       const urls = http.calls.map((c) => c.request.url);
       expect(urls.filter((url) => url.includes('/bills/'))).toEqual([
         billsPage,
         ...Array.from({ length: 5 }, (_, i) => `${origin}/bills/45-1/C-${i + 1}/`),
       ]);
-      expect(urls.filter((url) => url.includes('/votes/'))).toEqual([memberVotesUrl('2897')]);
+      expect(urls.filter((url) => url.includes('/votes/'))).toEqual([memberVotesUrl('110572')]);
       expect(urls.filter((url) => url.startsWith(origin))).toHaveLength(7);
     },
   );
@@ -478,14 +510,57 @@ describe('canparl_get_member production contract', () => {
     json(http, '/bills/45-1/C-1/', bill(1, true));
     memberVotes('2897', realMemberVotes('2897-45-1'));
     const data = parity(
-      await call({ slug: actor, sponsoredBills: 2, recentVotes: 25 }),
+      await call({ slug: actor, sponsoredBills: 2, recentVotes: 101 }),
       getMemberTool,
     );
     expect(data).toMatchObject({
-      appliedFilters: { sponsoredBills: 2, recentVotes: 10 },
-      cap: { sponsoredBills: 2, recentVotes: 10 },
-      notice: 'recentVotes 25 exceeds the per-call maximum of 10; returned up to 10.',
+      recentVotes: { limit: 100, total: 25, nextOffset: null, hasMore: false },
+      appliedFilters: { sponsoredBills: 2, recentVotes: 100 },
+      cap: { sponsoredBills: 2, recentVotes: 100 },
+      notice: 'recentVotes 101 exceeds the per-call maximum of 100; returned up to 100.',
     });
+  });
+  it('clamps OpenParliament ballots to 10 before the first ballot request, keeping the cold maximum', async () => {
+    json(http, actor, profile({ other_info: {}, image: null }));
+    const billsPage = page(
+      http,
+      '/bills/',
+      { limit: 5, offset: 0, sponsor_politician: actor },
+      Array.from({ length: 5 }, (_, i) => bill(i + 1)),
+      5,
+    );
+    for (let i = 1; i <= 5; i++) json(http, `/bills/45-1/C-${i}/`, bill(i, true));
+    const ballotsPage = page(
+      http,
+      '/votes/ballots/',
+      { limit: 10, offset: 0, politician: actor },
+      Array.from({ length: 10 }, (_, i) => ballot(i + 1)),
+      10,
+    );
+    for (let i = 1; i <= 10; i++) json(http, `/votes/45-1/${i}/`, vote(i));
+    const data = parity(await call({ slug: actor, recentVotes: 50 }), getMemberTool);
+    expect(data).toMatchObject({
+      member: { personId: null },
+      recentVotes: {
+        status: 'available',
+        limit: 10,
+        total: null,
+        nextOffset: 10,
+        hasMore: true,
+      },
+      appliedFilters: { recentVotes: 10 },
+      shown: { sponsoredBills: 5, recentVotes: 10 },
+      cap: { sponsoredBills: 5, recentVotes: 10 },
+      notice: `recentVotes 50 exceeds the per-call maximum of 10; returned up to 10. ${someUnavailable}`,
+    });
+    expect((data.recentVotes as { items: { source: string }[] }).items).toHaveLength(10);
+    expect(http.calls.map((c) => c.request.url)).toEqual([
+      `${origin}${actor}`,
+      billsPage,
+      ...Array.from({ length: 5 }, (_, i) => `${origin}/bills/45-1/C-${i + 1}/`),
+      ballotsPage,
+      ...Array.from({ length: 10 }, (_, i) => `${origin}/votes/45-1/${i + 1}/`),
+    ]);
   });
   const exactlyOne = 'Expected exactly one of slug or personId';
   it.each<[Record<string, string>, FilterRejection]>([
@@ -610,7 +685,20 @@ describe('canparl_get_member production contract', () => {
     expect(data).toMatchObject({
       memberships: [],
       sponsoredBills: { items: [{ title: { en: null, fr: null }, status: null }], hasMore: false },
-      recentVotes: { items: [{ date: null, subject: null, ballot: 'No' }], hasMore: false },
+      recentVotes: {
+        items: [
+          {
+            date: null,
+            subject: null,
+            ballot: 'No',
+            yeas: null,
+            nays: null,
+            paired: null,
+            documentType: null,
+          },
+        ],
+        hasMore: false,
+      },
     });
     expect(data.unavailable).toEqual([expect.objectContaining({ section: 'currentness' })]);
   });
@@ -687,8 +775,13 @@ describe('canparl_get_member production contract', () => {
       gender: null,
       ...extra,
     });
+  const allParliamentsUrl = parliamentRosterUrl('*');
+  /** Captured all-Parliaments roster; a digit-only slug absent from the current roster reads it. */
+  const allParliaments = () =>
+    http.route({ match: allParliamentsUrl, respond: () => new Response(realRoster('all')) });
   it('keeps a digit-only slug absent from the current roster as an OpenParliament ID', async () => {
     roster();
+    allParliaments();
     json(http, '/politicians/5724/', numericProfile('5724'));
     const data = parity(await call({ slug: '5724', ...disabled }), getMemberTool);
     expect(data).toMatchObject({
@@ -703,6 +796,7 @@ describe('canparl_get_member production contract', () => {
       openParliament: { status: 'available', reason: null },
       appliedFilters: { slug: '5724', personId: null },
     });
+    expect(data.notice).not.toContain('former MP');
   });
   it('reads a digit-only slug that is a current personId through the verified crosswalk', async () => {
     roster([rawPerson(2897)]);
@@ -749,7 +843,7 @@ describe('canparl_get_member production contract', () => {
   });
   it('describes the slug personId reading and the profile link rule', () => {
     expect(getMemberTool.input.shape.slug.description).toBe(
-      'Returned OpenParliament slug, politician path, or HTTPS OpenParliament profile URL; never a guessed name. A digit-only value equal to a current official personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.',
+      'Returned OpenParliament slug, politician path, or HTTPS OpenParliament profile URL; never a guessed name. A digit-only value equal to a current official personId, or its /politicians/<digits>/ path or profile URL, is read as that personId. Any other digit-only value is an OpenParliament ID; a notice names the former MP whose personId it also is.',
     );
     expect(getMemberTool.output.shape.member.shape.links.element.shape.url.description).toBe(
       'Absolute http or https URL as published, or a relative value resolved against https://openparliament.ca; never fetched, and only https values render as links.',
@@ -780,6 +874,7 @@ describe('canparl_get_member production contract', () => {
   });
   it('reads the roster once, before OpenParliament, for a numeric slug and reuses it for currentness', async () => {
     roster();
+    allParliaments();
     json(http, '/politicians/5724/', numericProfile('5724', { other_info: { parl_mp_id: ['9'] } }));
     const data = parity(await call({ slug: '5724', ...disabled }), getMemberTool);
     expect(data).toMatchObject({
@@ -789,21 +884,25 @@ describe('canparl_get_member production contract', () => {
     expect(http.calls.map((c) => c.request.url)).toEqual([
       rosterUrl,
       `${origin}/politicians/5724/`,
+      allParliamentsUrl,
     ]);
     expect((data.provenance as { url: string }[]).map((source) => source.url)).toEqual([
       rosterUrl,
       `${origin}/politicians/5724/`,
+      allParliamentsUrl,
     ]);
   });
   it.each(['413', '/politicians/413/'])(
     'returns historical lookup recovery when numeric slug %j answers with another canonical profile',
     async (slug) => {
       roster();
+      allParliaments();
       json(http, '/politicians/413/', numericProfile('413', { url: actor }));
       failure(await call({ slug, ...disabled }), getMemberTool.errors![1]!);
       expect(http.calls.map((c) => c.request.url)).toEqual([
         rosterUrl,
         `${origin}/politicians/413/`,
+        allParliamentsUrl,
       ]);
     },
   );
@@ -1030,6 +1129,10 @@ describe('canparl_get_member production contract', () => {
       officialBallot: 'Yea',
       billCode: null,
       result: 'Negatived',
+      yeas: 153,
+      nays: 165,
+      paired: 14,
+      documentType: 'Supply',
     };
     const official178 = {
       session: '45-1',
@@ -1043,6 +1146,10 @@ describe('canparl_get_member production contract', () => {
       officialBallot: 'Nay',
       billCode: 'C-39',
       result: 'Agreed To',
+      yeas: 296,
+      nays: 26,
+      paired: 10,
+      documentType: 'Legislative Process',
     };
     const sessions = () =>
       http.route({
@@ -1095,7 +1202,7 @@ describe('canparl_get_member production contract', () => {
         status: 'available',
         offset: 0,
         limit: 10,
-        total: null,
+        total: 25,
         nextOffset: 10,
         hasMore: true,
         failure: null,
@@ -1148,7 +1255,7 @@ describe('canparl_get_member production contract', () => {
           status: 'available',
           offset: votesOffset,
           limit: 10,
-          total: null,
+          total: 25,
           nextOffset,
           hasMore: nextOffset !== null,
           failure: null,
@@ -1158,7 +1265,7 @@ describe('canparl_get_member production contract', () => {
           truncated: { recentVotes: nextOffset !== null },
         });
         expect(data.notice).toBe(
-          expected.length ? officialOnlyNotice : `${officialOnlyNotice} ${pastEnd}`,
+          expected.length ? officialOnlyNotice : `${officialOnlyNotice} ${votesPastEnd}`,
         );
         expect(http.calls.map((c) => c.request.url)).toEqual([
           rosterUrl,
@@ -1181,25 +1288,25 @@ describe('canparl_get_member production contract', () => {
           true,
         );
         expect(data).toMatchObject({
-          recentVotes: { nextOffset: null, hasMore: false },
+          recentVotes: { total: 8, nextOffset: null, hasMore: false },
           appliedFilters: { votesBillCode: 'C-15', votesSession: '45-1' },
         });
       },
     );
-    it.each<[string, number, string]>([
-      ['C-15', 10, `${officialOnlyNotice} ${pastEnd}`],
-      ['C-9999', 10, `${officialOnlyNotice} ${emptyNotice}`],
-      ['C-9999', 0, `${officialOnlyNotice} ${emptyNotice}`],
+    it.each<[string, number, number, string]>([
+      ['C-15', 10, 8, `${officialOnlyNotice} ${votesPastEnd}`],
+      ['C-9999', 10, 0, `${officialOnlyNotice} ${emptyNotice}`],
+      ['C-9999', 0, 0, `${officialOnlyNotice} ${emptyNotice}`],
     ])(
       'states no match only for an empty filtered set: votesBillCode %s at votesOffset %i',
-      async (votesBillCode, votesOffset, notice) => {
+      async (votesBillCode, votesOffset, total, notice) => {
         officialOnly();
         const data = parity(
           await call({ personId: '2897', sponsoredBills: 0, votesBillCode, votesOffset }),
           getMemberTool,
         );
         expect(data).toMatchObject({
-          recentVotes: { status: 'available', items: [], nextOffset: null, hasMore: false },
+          recentVotes: { status: 'available', items: [], total, nextOffset: null, hasMore: false },
           appliedFilters: { votesBillCode, votesOffset },
         });
         expect(data.notice).toBe(notice);
@@ -1232,11 +1339,116 @@ describe('canparl_get_member production contract', () => {
       expect(numbers(data)).toEqual([78, 77, 75, 53, 179]);
       expect((data.recentVotes as Section).items.at(-1)).toEqual({ ...official179, date: null });
     });
+    it('relays a nil official tally as null, never 0', async () => {
+      officialOnly(
+        realMemberVotes('2897-45-1').replace(
+          '<DecisionDivisionNumberOfPaired>14</DecisionDivisionNumberOfPaired>',
+          '<DecisionDivisionNumberOfPaired xsi:nil="true" />',
+        ),
+      );
+      const data = parity(
+        await call({ personId: '2897', sponsoredBills: 0, recentVotes: 1 }),
+        getMemberTool,
+      );
+      expect((data.recentVotes as Section).items).toEqual([{ ...official179, paired: null }]);
+    });
+    /** Current member 110572 without a verified crosswalk, with the whole 196-division 45-1 feed. */
+    const wholeSession = (session?: string) => {
+      roster([rawPerson(110572)]);
+      candidates([]);
+      memberVotes('110572', realMemberVotes('110572-latest'), session);
+    };
+    it('pages a whole official session 100 rows at a time with its exact count', async () => {
+      wholeSession();
+      const first = parity(
+        await call({ personId: '110572', sponsoredBills: 0, recentVotes: 100 }),
+        getMemberTool,
+      );
+      expect(first).toMatchObject({
+        sponsoredBills: { status: 'not_requested', items: [], total: null },
+        recentVotes: {
+          status: 'available',
+          offset: 0,
+          limit: 100,
+          total: 196,
+          nextOffset: 100,
+          hasMore: true,
+          failure: null,
+        },
+        appliedFilters: { recentVotes: 100, votesSession: '45-1' },
+        shown: { recentVotes: 100 },
+        cap: { recentVotes: 100 },
+        truncated: { recentVotes: true },
+        notice: officialOnlyNotice,
+      });
+      const rows = (first.recentVotes as Section).items;
+      expect(rows[0]).toEqual({
+        session: '45-1',
+        number: 196,
+        date: '2026-11-19',
+        subject: 'Budgetary policy',
+        ballot: 'Yes',
+        url: division(196),
+        source: 'ourcommons',
+        officialBallot: 'Yea',
+        billCode: null,
+        result: 'Agreed To',
+        yeas: 162,
+        nays: 151,
+        paired: 16,
+        documentType: 'Ways and means',
+      });
+      expect(rows.at(-1)?.number).toBe(97);
+      const rest = parity(
+        await call({ personId: '110572', sponsoredBills: 0, recentVotes: 100, votesOffset: 100 }),
+        getMemberTool,
+      );
+      expect(rest.recentVotes).toMatchObject({
+        offset: 100,
+        limit: 100,
+        total: 196,
+        nextOffset: null,
+        hasMore: false,
+      });
+      expect(numbers(rest)).toHaveLength(96);
+      expect(numbers(rest).at(-1)).toBe(1);
+      expect(new Set([...numbers(first), ...numbers(rest)]).size).toBe(196);
+      expect(http.calls.filter((c) => c.request.url === memberVotesUrl('110572'))).toHaveLength(1);
+    });
+    it.each([0, 9, 20])(
+      'counts the nine C-15 ballots of 45-1 at votesOffset %i',
+      async (votesOffset) => {
+        sessions();
+        wholeSession('45-1');
+        const data = parity(
+          await call({
+            personId: '110572',
+            sponsoredBills: 0,
+            votesSession: '45-1',
+            votesBillCode: 'C-15',
+            votesOffset,
+          }),
+          getMemberTool,
+        );
+        expect(data.recentVotes).toMatchObject({ total: 9, nextOffset: null, hasMore: false });
+        expect(numbers(data)).toEqual(votesOffset ? [] : [82, 81, 80, 79, 78, 77, 76, 75, 53]);
+        expect(data.notice).toBe(
+          votesOffset ? `${officialOnlyNotice} ${votesPastEnd}` : officialOnlyNotice,
+        );
+      },
+    );
+    it('types total as a count on ballots and as always null on sponsored bills', () => {
+      const { recentVotes, sponsoredBills } = getMemberTool.output.shape;
+      expect(recentVotes.shape.total.safeParse(196).success).toBe(true);
+      expect(recentVotes.shape.total.safeParse(null).success).toBe(true);
+      expect(sponsoredBills.shape.total.safeParse(5).success).toBe(false);
+      expect(sponsoredBills.shape.total.safeParse(null).success).toBe(true);
+    });
     it('returns an available empty section and a null session for an empty feed', async () => {
       officialOnly(realMemberVotes('empty'));
       const data = parity(await call({ personId: '2897', sponsoredBills: 0 }), getMemberTool);
       expect(data).toMatchObject({
-        recentVotes: { status: 'available', items: [], nextOffset: null, hasMore: false },
+        recentVotes: { status: 'available', items: [], total: 0, nextOffset: null, hasMore: false },
         appliedFilters: { votesSession: null, votesBillCode: null },
         notice: expect.stringContaining(emptyNotice),
       });
@@ -1263,6 +1475,10 @@ describe('canparl_get_member production contract', () => {
         officialBallot: 'Yea',
         billCode: null,
         result: 'Agreed To',
+        yeas: 328,
+        nays: 0,
+        paired: 0,
+        documentType: 'Routine Proceedings',
       });
       expect(data).toMatchObject({ appliedFilters: { votesSession: '44-1' } });
       expect(http.calls.map((c) => c.request.url)).toEqual([
@@ -1391,6 +1607,7 @@ describe('canparl_get_member production contract', () => {
           items: [],
           offset: 0,
           limit: 10,
+          total: null,
           nextOffset: null,
           hasMore: false,
           failure: {
@@ -1439,7 +1656,14 @@ describe('canparl_get_member production contract', () => {
     it('labels OpenParliament ballots for a member without one official personId', async () => {
       json(http, actor, profile({ other_info: {}, image: null }));
       page(http, '/votes/ballots/', { limit: 10, offset: 0, politician: actor }, [ballot(1)]);
-      json(http, '/votes/45-1/1/', { ...vote(1), result: 'Passed' });
+      // OpenParliament's own tallies for 45-1 division 196 (2026-11-23), which carry no document type.
+      json(http, '/votes/45-1/1/', {
+        ...vote(1),
+        result: 'Passed',
+        yea_total: 162,
+        nay_total: 151,
+        paired_total: 16,
+      });
       const data = parity(await call({ slug: actor, sponsoredBills: 0 }), getMemberTool);
       expect((data.recentVotes as Section).items).toEqual([
         {
@@ -1453,9 +1677,16 @@ describe('canparl_get_member production contract', () => {
           officialBallot: null,
           billCode: null,
           result: 'Passed',
+          yeas: 162,
+          nays: 151,
+          paired: 16,
+          documentType: null,
         },
       ]);
-      expect(data).toMatchObject({ appliedFilters: { votesSession: null, votesBillCode: null } });
+      expect(data).toMatchObject({
+        recentVotes: { total: null, nextOffset: null },
+        appliedFilters: { votesSession: null, votesBillCode: null },
+      });
     });
     it.each([
       [{ votesSession: '45-1' }, { votesSession: '45-1', votesBillCode: null }],
@@ -1540,7 +1771,7 @@ describe('canparl_get_member production contract', () => {
         },
         memberships: null,
         openParliament: { status: 'unavailable', reason: 'enrichment_unavailable' },
-        recentVotes: { status: 'available', nextOffset: null, hasMore: false },
+        recentVotes: { status: 'available', total: 3, nextOffset: null, hasMore: false },
         appliedFilters: { personId: '1463', slug: null, votesSession: '38-1' },
         unavailable: [{ section: 'openParliament', failure: { reason: 'enrichment_unavailable' } }],
       });
@@ -1556,6 +1787,10 @@ describe('canparl_get_member production contract', () => {
           officialBallot: 'Yea',
           billCode: null,
           result: 'Agreed To',
+          yeas: 171,
+          nays: 133,
+          paired: 0,
+          documentType: 'Supply',
         },
         expect.objectContaining({ number: 189, officialBallot: 'Yea' }),
         expect.objectContaining({ number: 188, ballot: 'No', officialBallot: 'Nay' }),
@@ -1646,7 +1881,91 @@ describe('canparl_get_member production contract', () => {
         member: { personId: null, slug: '192', name: 'Unrelated Numeric', current: null },
         appliedFilters: { slug: '192', personId: null },
       });
-      expect(urls()).toEqual([rosterUrl, `${origin}/politicians/192/`]);
+      expect(urls()).toEqual([rosterUrl, `${origin}/politicians/192/`, everyone]);
+      expect(data.notice).toBe(
+        `192 was read as OpenParliament's Unrelated Numeric; it is also the official personId of former MP Denis Coderre. For that member, call canparl_get_member with personId 192. ${someUnavailable}`,
+      );
+    });
+    it.each<[string, () => Response]>([
+      ['HTTP 404', () => new Response('', { status: 404 })],
+      ['HTTP 429 on every attempt', () => new Response('', { status: 429 })],
+      [
+        'a bot-check HTML page served with 200 on every attempt',
+        () =>
+          new Response(
+            '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body></body></html>',
+          ),
+      ],
+      [
+        'a body that ends after the former member’s row',
+        () => {
+          const all = realRoster('all');
+          const close = '</MemberOfParliament>';
+          const end = all.indexOf(close, all.indexOf('<PersonId>192</PersonId>')) + close.length;
+          return new Response(all.slice(0, end));
+        },
+      ],
+    ])(
+      'answers a digit-only slug equal to a former personId without the disclosure when the all-Parliaments read fails with %s',
+      async (_case, respond) => {
+        http.route(
+          { match: rosterUrl, respond: () => new Response(realRoster('current')) },
+          { match: everyone, respond },
+        );
+        json(http, '/politicians/192/', numericProfile('192', { name: 'Unrelated Numeric' }));
+        const data = parity(await call({ slug: '192', ...disabled }), getMemberTool);
+        expect(data).toMatchObject({
+          member: { personId: null, slug: '192', name: 'Unrelated Numeric', current: null },
+          appliedFilters: { slug: '192', personId: null },
+        });
+        expect(data.notice).toBe(someUnavailable);
+        expect(urls()).toContain(everyone);
+        expect((data.provenance as { url: string }[]).map((source) => source.url)).not.toContain(
+          everyone,
+        );
+      },
+    );
+    it("keeps the slug profile's own personId for official ballots beside the disclosure", async () => {
+      rosters();
+      // 192 is Denis Coderre's personId; this OpenParliament profile records Ron Cannan's 35933.
+      json(
+        http,
+        '/politicians/192/',
+        numericProfile('192', { other_info: { parl_mp_id: ['35933'] } }),
+      );
+      memberVotes('35933', realMemberVotes('35933-latest'));
+      const data = parity(
+        await call({ slug: '192', sponsoredBills: 0, recentVotes: 150 }),
+        getMemberTool,
+      );
+      expect(data).toMatchObject({
+        member: { personId: '35933', slug: '192', current: false, from: null, to: null },
+        recentVotes: { status: 'available', limit: 100, total: 3 },
+        appliedFilters: { slug: '192', personId: null, votesSession: '41-2' },
+        unavailable: [],
+      });
+      expect(data.notice).toBe(
+        "192 was read as OpenParliament's Numeric Example; it is also the official personId of former MP Denis Coderre. For that member, call canparl_get_member with personId 192. recentVotes 150 exceeds the per-call maximum of 100; returned up to 100.",
+      );
+      expect(urls()).toEqual([
+        rosterUrl,
+        `${origin}/politicians/192/`,
+        everyone,
+        memberVotesUrl('35933'),
+      ]);
+    });
+    it('routes a digit-only slug holding no profile but a former personId to its personId', async () => {
+      rosters();
+      http.route({
+        match: `${origin}/politicians/1463/`,
+        respond: new Response('', { status: 404 }),
+      });
+      failure(await call({ slug: '1463', ...disabled }), {
+        ...getMemberTool.errors![1]!,
+        recovery:
+          "The slug value matches no OpenParliament profile, but its digits are a former MP's official personId; call canparl_get_member with those digits as personId.",
+      });
+      expect(urls()).toEqual([rosterUrl, `${origin}/politicians/1463/`, everyone]);
     });
     it('fails an empty all-Parliaments roster as unavailable instead of member_not_found', async () => {
       http.route(

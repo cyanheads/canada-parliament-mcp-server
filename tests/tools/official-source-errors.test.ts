@@ -4,6 +4,7 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getBillTool } from '@/mcp-server/tools/definitions/get-bill.tool.js';
+import { getBillTextTool } from '@/mcp-server/tools/definitions/get-bill-text.tool.js';
 import { getMemberTool } from '@/mcp-server/tools/definitions/get-member.tool.js';
 import { getVoteTool } from '@/mcp-server/tools/definitions/get-vote.tool.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
@@ -13,15 +14,27 @@ import { searchSpeechesTool } from '@/mcp-server/tools/definitions/search-speech
 import { searchVotesTool } from '@/mcp-server/tools/definitions/search-votes.tool.js';
 import { disposeOurCommonsService, initOurCommonsService } from '@/services/ourcommons/index.js';
 import {
+  billTextFixture,
+  capturedRedirects,
+  capturedXml,
+} from '../fixtures/bill-tools/bill-text.js';
+import {
   assertDomainParity,
   assertError,
+  detail,
   expectExact,
+  picker,
+  rawBill,
+  sessions,
   settle,
   setup,
   teardown,
   trailerFields,
 } from '../fixtures/bill-tools/harness.js';
 import { parliamentRosterUrl, realRoster, rosterPicker } from '../fixtures/member-tools/harness.js';
+
+/** The DocumentViewer request for 45-1 S-2 at first reading. */
+const viewerUrl = 'https://www.parl.ca/DocumentViewer/en/13542656';
 
 describe('official source refusal envelopes', () => {
   let http: ReturnType<typeof setup>;
@@ -39,6 +52,11 @@ describe('official source refusal envelopes', () => {
       definition: getBillTool,
       source: 'legisinfo',
       call: () => runToolContract(getBillTool, { session: '45-1', billCode: 'C-901' }),
+    },
+    {
+      definition: getBillTextTool,
+      source: 'legisinfo',
+      call: () => runToolContract(getBillTextTool, { session: '45-1', billCode: 'C-901' }),
     },
     {
       definition: searchBillsTool,
@@ -143,6 +161,13 @@ describe('official source refusal envelopes', () => {
       served: [['https://www.ourcommons.ca/Members/en/search/xml', 'current']] as const,
       refused: parliamentRosterUrl('*'),
     },
+    {
+      name: 'the postal-code lookup',
+      definition: searchMembersTool,
+      call: () => runToolContract(searchMembersTool, { postalCode: 'K1A 0A6' }),
+      served: [],
+      refused: 'https://www.ourcommons.ca/Members/en/search/xml?q=K1A0A6',
+    },
   ])(
     'fails a 403 from $name as upstream_blocked without retry',
     async ({ definition, call, served, refused }) => {
@@ -165,6 +190,68 @@ describe('official source refusal envelopes', () => {
       expect(JSON.stringify(result)).not.toContain('refusal-private-marker');
       expect(http.calls.map((entry) => entry.request.url)).toEqual([
         ...served.map(([url]) => url),
+        refused,
+      ]);
+    },
+  );
+  it.each([
+    { name: 'a DocumentViewer page', viewerServed: false, refused: viewerUrl },
+    { name: 'a bill XML export', viewerServed: true, refused: capturedXml.s2En },
+  ])(
+    'fails a 403 from $name in canparl_get_bill_text as upstream_blocked without retry',
+    async ({ viewerServed, refused }) => {
+      sessions(http);
+      http.route({
+        match: detail('S-2'),
+        respond: Response.json([
+          rawBill('S-2', {
+            Publications: [
+              {
+                PublicationId: 13542656,
+                PublicationTypeId: 80701,
+                PublicationTypeNameEn: 'First Reading',
+                PublicationTypeNameFr: 'Première lecture',
+              },
+            ],
+          }),
+        ]),
+      });
+      const page = `https://www.parl.ca${capturedRedirects.s2FirstReading}`;
+      if (viewerServed)
+        http.route(
+          {
+            match: viewerUrl,
+            respond: new Response(null, {
+              status: 302,
+              headers: { location: capturedRedirects.s2FirstReading },
+            }),
+          },
+          { match: page, respond: new Response(billTextFixture('viewer-S-2-first-reading.html')) },
+        );
+      http.route({
+        match: refused,
+        respond: new Response('<html>refusal-private-marker</html>', { status: 403 }),
+      });
+      const result = await settle(
+        runToolContract(getBillTextTool, { session: '45-1', billCode: 'S-2' }),
+      );
+      assertError(
+        result,
+        'upstream_blocked',
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Retry LEGISinfo later for official parliamentary data.',
+      );
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          message: 'LEGISinfo refused the official data request.',
+          data: { source: 'legisinfo', status: 403 },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain('refusal-private-marker');
+      expect(http.calls.map((entry) => entry.request.url)).toEqual([
+        picker,
+        detail('S-2'),
+        ...(viewerServed ? [viewerUrl, page] : []),
         refused,
       ]);
     },
@@ -210,5 +297,38 @@ describe('official source refusal envelopes', () => {
     );
     expect(JSON.stringify(result)).not.toContain('refusal-private-marker');
     expect(http.calls).toHaveLength(2);
+  });
+});
+
+describe('declared failure log level', () => {
+  const definitions = [
+    getBillTool,
+    getBillTextTool,
+    getMemberTool,
+    getVoteTool,
+    listReferenceTool,
+    searchBillsTool,
+    searchMembersTool,
+    searchSpeechesTool,
+    searchVotesTool,
+  ];
+  /** Caller input and ordinary lookup misses are modeled outcomes; upstream failures stay errors. */
+  const callerOutcomes = new Set<number>([
+    JsonRpcErrorCode.ValidationError,
+    JsonRpcErrorCode.NotFound,
+  ]);
+  it('logs caller-input and not-found reasons at notice and every upstream failure at error', () => {
+    const entries = definitions.flatMap((definition) =>
+      (definition.errors ?? []).map((entry) => ({
+        tool: definition.name,
+        reason: entry.reason,
+        code: entry.code,
+        severity: 'severity' in entry ? entry.severity : undefined,
+      })),
+    );
+    for (const { tool, reason, code, severity } of entries)
+      expect(severity, `${tool} ${reason}`).toBe(callerOutcomes.has(code) ? 'notice' : undefined);
+    expect(entries.filter((entry) => entry.severity === 'notice')).toHaveLength(27);
+    expect(entries.filter((entry) => entry.severity === undefined)).toHaveLength(14);
   });
 });

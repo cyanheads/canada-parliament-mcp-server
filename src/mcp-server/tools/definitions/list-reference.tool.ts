@@ -126,6 +126,7 @@ export const listReferenceTool = tool('canparl_list_reference', {
     {
       reason: 'unknown_reference_session',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Session with a zero or out-of-range number, or absent from the topic-relevant source index.',
       recovery:
         'Call canparl_list_reference with topic sessions and omit session to see supported choices.',
@@ -134,6 +135,7 @@ export const listReferenceTool = tool('canparl_list_reference', {
     {
       reason: 'incompatible_reference_session',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'A session is supplied for the global sessions topic, or a session other than the current one for the parties topic, whose entries describe the current House roster.',
       recovery:
         "Call canparl_list_reference again without session: topic sessions lists the whole index and topic parties covers the current session only; for a past division's caucuses read canparl_get_vote byParty.",

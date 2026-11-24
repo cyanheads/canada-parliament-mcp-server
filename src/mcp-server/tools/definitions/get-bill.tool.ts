@@ -22,7 +22,7 @@ import {
 } from '@/domain/schemas.js';
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
 import type { BillDossier } from '@/services/legisinfo/types.js';
-import { formatResult, RESPONSE_BUDGET, renderValue, responseBytes } from './_format.js';
+import { formatResult, OUTLINE_THRESHOLD_BYTES, renderValue, responseBytes } from './_format.js';
 
 const text = () => z.string().nullable();
 const integer = () => z.number().int().nullable();
@@ -32,6 +32,7 @@ const sectionNames = [
   'stages.house',
   'stages.senate',
   'stages.royalAssent',
+  'interChamberMessages',
   'divisions',
   'senateVoteDetails',
   'publications',
@@ -42,12 +43,16 @@ const sectionNames = [
   'notes.fr',
   'milestones',
   'webReferences',
+  'reinstatement',
+  'similarBills',
 ] as const;
 /** Exactly one listed selector. */
 const SECTION_FORMAT: InputFormat = {
   source: `(?:${sectionNames.map((name) => name.replaceAll('.', '\\.')).join('|')})`,
   expectation: `Unknown section. Available sections: ${sectionNames.join(', ')}.`,
 };
+/** Default collection page size; any other `limit` without a collection section is rejected. */
+const SECTION_LIMIT_DEFAULT = 20;
 /** Sections returned whole; only the remaining collections accept offset and limit. */
 const scalarSections = new Set<string>([
   'sponsor',
@@ -57,6 +62,7 @@ const scalarSections = new Set<string>([
   'notes.en',
   'notes.fr',
   'milestones',
+  'reinstatement',
 ]);
 /** Plain-text bilingual field; a `<field>.en` or `<field>.fr` section carries one language. */
 const languageText = (what: string) =>
@@ -68,6 +74,16 @@ const languageText = (what: string) =>
     .partial()
     .strict();
 const reading = (what: string) => text().describe(`${what} date-time, or null.`);
+const reinstatementLink = (adjacent: 'previous' | 'next') =>
+  z
+    .object({
+      session: text().describe(
+        `The same Parliament's ${adjacent} session in the official session index, or null when the index does not list it.`,
+      ),
+      billCode: text().describe('Bill code in that session, or null when the dossier names none.'),
+    })
+    .strict()
+    .nullable();
 /** Official bill identity and list metadata, without fabricated sponsor fields. */
 export const BillSummarySchema = z
   .object({
@@ -176,7 +192,7 @@ const StageSchema = z
 /** Read one official bill dossier without changing unavailable source values. */
 export const getBillTool = tool('canparl_get_bill', {
   description:
-    "Read one House or Senate bill's official dossier. Large dossiers return an outline; re-call with one section and follow pagination.nextOffset for collections. Stages preserve nested records whole. Obtain billCode and session from canparl_search_bills; omitted session means the verified current official session.",
+    "Read one House or Senate bill's official dossier. Large dossiers return an outline; re-call with one section and follow pagination.nextOffset for collections. Stages preserve nested records whole; interChamberMessages records the messages and amendment exchanges between the House and Senate. For earlier or later versions of a bill, read similarBills and reinstatement and pass a returned session and billCode back to canparl_get_bill. Obtain billCode and session from canparl_search_bills; omitted session means the verified current official session.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     session: SessionInputSchema,
@@ -197,9 +213,9 @@ export const getBillTool = tool('canparl_get_bill', {
       .int()
       .min(1)
       .max(COUNT_CEILING)
-      .default(20)
+      .default(SECTION_LIMIT_DEFAULT)
       .describe(
-        'Maximum whole records per selected collection page, 1–100 per call; larger values up to 10000 return 100 with a notice, and the byte budget may reduce it.',
+        'Maximum whole records per selected collection page, 1–100 per call; larger values up to 10000 return 100 with a notice.',
       ),
   }),
   output: z.object({
@@ -232,12 +248,7 @@ export const getBillTool = tool('canparl_get_bill', {
       .object({
         section: z.string().describe('Selected section.'),
         offset: z.number().int().describe('Requested zero-based record offset.'),
-        limit: z
-          .number()
-          .int()
-          .describe(
-            'Effective maximum page size after the per-call cap; the byte budget may return fewer.',
-          ),
+        limit: z.number().int().describe('Effective maximum page size after the per-call cap.'),
         total: z
           .number()
           .int()
@@ -254,7 +265,7 @@ export const getBillTool = tool('canparl_get_bill', {
     disclosure: z
       .string()
       .optional()
-      .describe('Overflow, empty, unavailable, past-end, or response-budget-stop guidance.'),
+      .describe('Outline, empty, unavailable, or past-end guidance.'),
     ...z
       .object({
         bill: BillSummarySchema.describe('Official bill summary.'),
@@ -289,6 +300,26 @@ export const getBillTool = tool('canparl_get_bill', {
           .partial()
           .strict()
           .describe('All official stage containers.'),
+        interChamberMessages: z
+          .array(
+            z
+              .object({
+                name: BilingualTextSchema.describe(
+                  'Event names, such as Message sent to the House of Commons or Consideration of Senate amendments.',
+                ),
+                dateTime: text().describe(
+                  'Event date-time in Ottawa time as published, without an offset; or null.',
+                ),
+                chamber: chamber().describe('Chamber that recorded the event, or null.'),
+                sittingNumber: text().describe("That chamber's sitting number, or null."),
+              })
+              .strict()
+              .describe('Official message or amendment exchange between the chambers.'),
+          )
+          .nullable()
+          .describe(
+            'Messages between the House and Senate in source order, the record of whether the Senate amended the bill and how the House answered; null if unavailable.',
+          ),
         divisions: z
           .array(
             z
@@ -319,7 +350,12 @@ export const getBillTool = tool('canparl_get_bill', {
           .array(
             z
               .object({
-                id: z.number().int().describe('Official publication ID.'),
+                id: z
+                  .number()
+                  .int()
+                  .describe(
+                    "Official publication ID; pass it as publicationId to canparl_get_bill_text to read that version's text.",
+                  ),
                 typeId: integer().describe('Publication type ID, or null.'),
                 type: BilingualTextSchema.describe('Publication type wording.'),
                 url: z.string().describe('Verified absolute HTTPS document viewer URL.'),
@@ -377,6 +413,25 @@ export const getBillTool = tool('canparl_get_bill', {
           .describe(
             'Related documents, press releases, and costing notes, or null if unavailable.',
           ),
+        reinstatement: z
+          .object({
+            from: reinstatementLink('previous').describe(
+              'Bill this one was reinstated from, or null.',
+            ),
+            as: reinstatementLink('next').describe('Bill this one was reinstated as, or null.'),
+          })
+          .strict()
+          .describe(
+            "Reinstatement links from LEGISinfo's flags. A bill reinstated by government motion carries none; similarBills still lists its earlier version.",
+          ),
+        similarBills: z
+          .array(
+            BillSummarySchema.describe('Similar or earlier bill as a canparl_search_bills row.'),
+          )
+          .nullable()
+          .describe(
+            'Earlier versions and related bills, newest session first, then by chamber prefix, number, and split-bill suffix letter; null if unavailable.',
+          ),
         provenance: z
           .array(SourceSchema)
           .describe('Original retrieval metadata for every source request.'),
@@ -405,6 +460,7 @@ export const getBillTool = tool('canparl_get_bill', {
     {
       reason: 'invalid_bill_section',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Pagination supplied without a collection section.',
       recovery:
         'Choose an available section from the outline and use offset and limit only for collections.',
@@ -413,6 +469,7 @@ export const getBillTool = tool('canparl_get_bill', {
     {
       reason: 'unknown_session',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Session with a zero or out-of-range number, or absent from the official bill session index.',
       recovery: 'Call canparl_list_reference with topic sessions and choose a listed bill session.',
       retryable: false,
@@ -421,6 +478,7 @@ export const getBillTool = tool('canparl_get_bill', {
     {
       reason: 'bill_not_found',
       code: JsonRpcErrorCode.NotFound,
+      severity: 'notice',
       when: 'Official dossier has no matching record or returns a missing-record response.',
       recovery: 'Call canparl_search_bills in the same session and copy a returned billCode.',
       retryable: false,
@@ -459,7 +517,6 @@ export const getBillTool = tool('canparl_get_bill', {
       ctx.enrich(enrichment);
       request.throwIfOuterAborted();
       const full = { ...result.data, provenance: [...resolved.provenance, ...result.provenance] };
-      const size = (value: unknown) => responseBytes(value, enrichment);
       // A dotted selector (`stages.house`, `summary.en`) selects one key under its parent.
       const sections = sectionNames.map((name) => {
         const [parent, child] = name.split('.') as [keyof BillDossier, string?];
@@ -469,69 +526,59 @@ export const getBillTool = tool('canparl_get_bill', {
         return { name, parent, child, value };
       });
       if (!input.section) {
-        if (input.offset !== 0 || input.limit !== 20) throw ctx.fail('invalid_bill_section');
-        if (size(full) <= RESPONSE_BUDGET) return full;
+        if (input.offset !== 0 || input.limit !== SECTION_LIMIT_DEFAULT)
+          throw ctx.fail('invalid_bill_section');
+        if (responseBytes(full, enrichment) <= OUTLINE_THRESHOLD_BYTES) return full;
         return {
           kind: 'outline' as const,
           bill: full.bill,
           sponsor: full.sponsor,
           statute: full.statute,
           milestones: full.milestones,
+          reinstatement: full.reinstatement,
           provenance: full.provenance,
           sections: sections.map(({ name, value }) => ({
             name,
             count: Array.isArray(value) ? value.length : null,
           })),
-          disclosure: `Dossier exceeds the ${RESPONSE_BUDGET}-byte serialized response budget. Re-call with one section selector; collections use offset and limit. No records have been discarded.`,
+          disclosure: `Dossier exceeds the ${OUTLINE_THRESHOLD_BYTES}-byte outline threshold. Re-call with one section selector; collections use offset and limit. No records have been discarded.`,
         };
       }
       // The section pattern admits only listed selectors.
       const selected = sections.find(
         ({ name }) => name === input.section,
       ) as (typeof sections)[number];
-      if (scalarSections.has(selected.name) && (input.offset !== 0 || input.limit !== 20))
+      if (
+        scalarSections.has(selected.name) &&
+        (input.offset !== 0 || input.limit !== SECTION_LIMIT_DEFAULT)
+      )
         throw ctx.fail('invalid_bill_section');
       const values = Array.isArray(selected.value) ? selected.value : null;
-      const page = (count: number, disclosure?: string) => {
-        const value =
-          values === null ? selected.value : values.slice(input.offset, input.offset + count);
-        return {
-          kind: 'section' as const,
-          totalCount: values?.length ?? null,
-          bill: full.bill,
-          provenance: full.provenance,
-          [selected.parent]: selected.child === undefined ? value : { [selected.child]: value },
-          pagination: {
-            section: selected.name,
-            offset: input.offset,
-            limit: limit.value,
-            total: values?.length ?? null,
-            nextOffset:
-              values !== null && input.offset + count < values.length ? input.offset + count : null,
-          },
-          ...(disclosure ? { disclosure } : {}),
-        };
-      };
-      const available =
-        values === null ? 0 : Math.max(0, Math.min(limit.value, values.length - input.offset));
-      /** A page shorter than `available` is a budget stop, disclosed inside the measured page. */
-      const stop = (count: number) =>
-        count < available
-          ? `The ${RESPONSE_BUDGET}-byte response budget ended this page after ${count} ${count === 1 ? 'record' : 'records'}; call canparl_get_bill with pagination.nextOffset and the same section to continue.`
-          : undefined;
-      let count = available;
-      while (count > 1 && size(page(count, stop(count))) > RESPONSE_BUDGET) count--;
+      const end = values === null ? 0 : Math.min(values.length, input.offset + limit.value);
       const disclosure =
-        size(page(count, stop(count))) > RESPONSE_BUDGET
-          ? 'One indivisible record or scalar section exceeds the serialized response budget; returned whole without truncation.'
-          : selected.value === null
-            ? 'Section is unavailable in the official source.'
-            : values?.length === 0
-              ? 'Section has no records.'
-              : values !== null && input.offset >= values.length
-                ? 'Offset is past the end of this section.'
-                : stop(count);
-      return page(count, disclosure);
+        selected.value === null
+          ? 'Section is unavailable in the official source.'
+          : values?.length === 0
+            ? 'Section has no records.'
+            : values !== null && input.offset >= values.length
+              ? 'Offset is past the end of this section.'
+              : undefined;
+      const value = values === null ? selected.value : values.slice(input.offset, end);
+      return {
+        kind: 'section' as const,
+        totalCount: values?.length ?? null,
+        bill: full.bill,
+        provenance: full.provenance,
+        [selected.parent]: selected.child === undefined ? value : { [selected.child]: value },
+        pagination: {
+          section: selected.name,
+          offset: input.offset,
+          limit: limit.value,
+          total: values?.length ?? null,
+          nextOffset: values !== null && end < values.length ? end : null,
+        },
+        ...(disclosure ? { disclosure } : {}),
+      };
     } finally {
       request.dispose();
     }

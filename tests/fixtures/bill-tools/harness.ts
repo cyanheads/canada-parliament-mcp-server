@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { expect, vi } from 'vitest';
 import type { JsonRecord } from '@/domain/schemas.js';
-import { RESPONSE_BUDGET, responseBytes } from '@/mcp-server/tools/definitions/_format.js';
+import { responseBytes } from '@/mcp-server/tools/definitions/_format.js';
 import { disposeLegisinfoService, initLegisinfoService } from '@/services/legisinfo/index.js';
 import {
   disposeOpenParliamentService,
@@ -41,12 +41,25 @@ export const rawBill = (code = 'C-901', extra: Record<string, unknown> = {}) => 
   ...extra,
 });
 /**
- * Captured LEGISinfo dossier response bodies (2026-10-21). Values are verbatim; the 35-1 record is
- * whole, the others keep their identity, sponsor, statute, and reading fields plus the fields their
- * tests exercise (notes, summaries, web references, publications).
+ * Captured LEGISinfo dossier response bodies with verbatim values. The 2026-10-21 captures: 35-1 C-1
+ * is whole, the others keep their identity, sponsor, statute, and reading fields plus the fields
+ * their tests exercise (notes, summaries, web references, publications). The 2026-11-23 captures
+ * (reinstatement, similar bills, and inter-chamber messages) are whole records.
  */
 export const realDossier = (
-  name: '35-1-c-1' | '41-1-c-38' | '42-1-c-86' | '44-1-c-69' | '45-1-c-15',
+  name:
+    | '35-1-c-1'
+    | '35-2-c-2'
+    | '37-1-c-15a'
+    | '41-1-c-38'
+    | '41-1-c-201'
+    | '41-2-c-201'
+    | '42-1-c-86'
+    | '43-2-c-218'
+    | '43-2-s-230'
+    | '44-1-c-69'
+    | '45-1-c-9'
+    | '45-1-c-15',
 ): string => readFileSync(new URL(`./dossiers/${name}.json`, import.meta.url), 'utf8');
 
 /** Fresh real service accessors with only the HTTP boundary replaced. */
@@ -155,13 +168,12 @@ export function wireBytes(result: unknown): number {
   return Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(256), result }), 'utf8');
 }
 /**
- * A budgeted tool's complete response: every declared enrichment field decodes exactly, in order,
- * from its trailer; the shared measure equals the wire; and two or more records fit the budget.
+ * A measured tool's complete response: every declared enrichment field decodes exactly, in order,
+ * from its trailer, and the shared measure equals the wire.
  */
 export function assertMeasuredResponse(
   result: { structuredContent?: unknown; content: readonly { type: string; text?: string }[] },
   definition: { enrichment?: Record<string, unknown>; output: { parse(value: unknown): unknown } },
-  records?: readonly unknown[],
 ): number {
   const data = result.structuredContent as JsonRecord;
   const enrichment: JsonRecord = {};
@@ -170,7 +182,6 @@ export function assertMeasuredResponse(
   expectExact(trailerFields(result.content.slice(1)), enrichment);
   const wire = wireBytes(result);
   expect(responseBytes(definition.output.parse(data), enrichment)).toBe(wire);
-  if (records && records.length > 1) expect(wire).toBeLessThanOrEqual(RESPONSE_BUDGET);
   return wire;
 }
 

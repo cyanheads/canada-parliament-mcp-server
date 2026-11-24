@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeBillCode,
   normalizeDate,
+  normalizePostalCode,
   normalizeSession,
   PERSON_ID,
 } from '@/domain/normalization.js';
@@ -25,13 +26,15 @@ import {
   SourceSchema,
 } from '@/domain/schemas.js';
 import { getBillTool } from '@/mcp-server/tools/definitions/get-bill.tool.js';
+import { getBillTextTool } from '@/mcp-server/tools/definitions/get-bill-text.tool.js';
 import { getMemberTool } from '@/mcp-server/tools/definitions/get-member.tool.js';
 import { getVoteTool } from '@/mcp-server/tools/definitions/get-vote.tool.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
 import { searchBillsTool } from '@/mcp-server/tools/definitions/search-bills.tool.js';
+import { searchMembersTool } from '@/mcp-server/tools/definitions/search-members.tool.js';
 import { searchSpeechesTool } from '@/mcp-server/tools/definitions/search-speeches.tool.js';
 import { searchVotesTool } from '@/mcp-server/tools/definitions/search-votes.tool.js';
-import { cpu } from '../fixtures/cpu-timing.js';
+import { expectLinearCpu } from '../fixtures/cpu-timing.js';
 
 describe('shared schemas', () => {
   it.each([undefined, '', ' \t\r\n '])('treats blank optional input %j as absent', (input) => {
@@ -151,13 +154,16 @@ const optional = (core: string) => `^\\s*(?:${core}\\s*)?$`;
 const required = (core: string) => `^\\s*${core}\\s*$`;
 const DATE = '[0-9]{4}-[0-9]{2}-[0-9]{2}';
 const SESSION = '[0-9]+-[0-9]+';
-const BILL =
-  '(?:[Bb][Ii][Ll][Ll]\\s+)?[CcSs][-\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\u2010-\\u2015\\u2212]?[1-9][0-9]*[A-Za-z]?';
+const SEPARATOR =
+  '[-\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\u2010-\\u2015\\u2212]?';
+const BILL = `(?:[Bb][Ii][Ll][Ll]\\s+)?[CcSs]${SEPARATOR}[1-9][0-9]*[A-Za-z]?`;
+const POSTAL = `[A-Za-z][0-9][A-Za-z]${SEPARATOR}[0-9][A-Za-z][0-9]`;
 const SECTIONS = [
   'sponsor',
   'stages.house',
   'stages.senate',
   'stages.royalAssent',
+  'interChamberMessages',
   'divisions',
   'senateVoteDetails',
   'publications',
@@ -168,9 +174,13 @@ const SECTIONS = [
   'notes.fr',
   'milestones',
   'webReferences',
+  'reinstatement',
+  'similarBills',
 ];
 const SECTION =
-  '(?:sponsor|stages\\.house|stages\\.senate|stages\\.royalAssent|divisions|senateVoteDetails|publications|statute|summary\\.en|summary\\.fr|notes\\.en|notes\\.fr|milestones|webReferences)';
+  '(?:sponsor|stages\\.house|stages\\.senate|stages\\.royalAssent|interChamberMessages|divisions|senateVoteDetails|publications|statute|summary\\.en|summary\\.fr|notes\\.en|notes\\.fr|milestones|webReferences|reinstatement|similarBills)';
+const SEGMENTS = ['introduction', 'headings', 'body', 'schedules'];
+const SEGMENT = '(?:introduction|headings|body|schedules)';
 
 /** Whether `normalize` returns for `value` rather than throwing. */
 const settles = (normalize: (value: string) => unknown) => (value: string) => {
@@ -261,6 +271,7 @@ const FORMATS: Record<string, Format> = {
     fields: [
       [searchBillsTool, ['session']],
       [getBillTool, ['session']],
+      [getBillTextTool, ['session']],
       [searchVotesTool, ['session']],
       [getVoteTool, ['session']],
       [listReferenceTool, ['session']],
@@ -324,6 +335,7 @@ const FORMATS: Record<string, Format> = {
       'Expected a House or Senate bill code such as C-15, C-15A, or S-1001: C or S, an optional single dash or space, a number without leading zeros, then an optional suffix letter.',
     fields: [
       [getBillTool, ['billCode']],
+      [getBillTextTool, ['billCode']],
       [searchSpeechesTool, ['billDebated', 'code']],
       [searchSpeechesTool, ['mentionedBill', 'code']],
     ],
@@ -341,6 +353,27 @@ const FORMATS: Record<string, Format> = {
     impossible: [],
     tokens: ['bill', 'BILL', 'C', 's', '15', '15a', '1001', '-', cp(0x2013), ' '],
   },
+  postalCode: {
+    pattern: optional(POSTAL),
+    expectation:
+      'Expected a six-character Canadian postal code such as K1A 0A6: letter, digit, letter, an optional single space or dash, then digit, letter, digit.',
+    fields: [[searchMembersTool, ['postalCode']]],
+    handles: blankOr(settles(normalizePostalCode)),
+    semantic: () => false,
+    placements: (c) => [...pad('K1A 0A6')(c), `K1A${c}0A6`, `${c}1A0A6`, `K${c}A0A6`, `K1A0A${c}`],
+    examples: [
+      ' k1a-0a6 ',
+      `K1A${cp(0xa0)}0A6`,
+      'K1A  0A6',
+      'K1A',
+      'K1A0A',
+      'K1A0A67',
+      '1A1A1A',
+      `${cp(0x212a)}1A0A6`,
+    ],
+    impossible: [],
+    tokens: ['K1A', '0A6', 'k1a', 'K', 'a', '1', '0', '-', ' ', cp(0xa0), cp(0x2013)],
+  },
   section: {
     pattern: optional(SECTION),
     expectation: `Unknown section. Available sections: ${SECTIONS.join(', ')}.`,
@@ -356,6 +389,17 @@ const FORMATS: Record<string, Format> = {
     examples: [' sponsor ', '', 'Sponsor', 'summary', 'notes.de', 'stages.house.', 'stagesxhouse'],
     impossible: [],
     tokens: [...SECTIONS, 'stages', 'summary', 'notes', '.', 'en'],
+  },
+  segment: {
+    pattern: optional(SEGMENT),
+    expectation: `Unknown segment. Available segments: ${SEGMENTS.join(', ')}.`,
+    fields: [[getBillTextTool, ['segment']]],
+    handles: blankOr((trimmed) => SEGMENTS.includes(trimmed)),
+    semantic: () => false,
+    placements: (c) => [...pad('body')(c), `head${c}ings`, `body${c}`],
+    examples: [' body ', '', 'Body', 'heading', 'bodies', 'preamble', 'schedule'],
+    impossible: [],
+    tokens: [...SEGMENTS, 'head', 'ings', 'schedule', 's', ' '],
   },
 };
 /** Every code point `String.prototype.trim` removes; JavaScript `\s` matches exactly these. */
@@ -520,49 +564,74 @@ describe('advertised input format timing', { timeout: 0 }, () => {
     scopeSession: '45-1',
     billCode: 'bill C-15A',
     requiredBillCode: 'bill C-15A',
+    postalCode: 'K1A 0A6',
     section: 'stages.house',
+    segment: 'schedules',
   };
-  it.each(Object.entries(FORMATS))(
-    'decides %s input of every size in time linear in its length',
-    (name, format) => {
+  /** Input of about `n` characters, built around the format's accepted `value`. */
+  const shapes: [string, (value: string, n: number) => string][] = [
+    ['one long line ending in a break', (_, n) => `${'§1 x'.repeat(n / 4)}\ny`],
+    ['breaks throughout', (_, n) => '  \r\n'.repeat(n / 4)],
+    ['padding before a stray character', (_, n) => `${' '.repeat(n)}x`],
+    ['the value, padding, and a stray character', (value, n) => `${value}${' '.repeat(n)}x`],
+    [
+      'the value inside padding before a stray character',
+      (value, n) => `${' '.repeat(n / 2)}${value}${' '.repeat(n / 2)}x`,
+    ],
+    [
+      'a digit run in place of the last character of the value',
+      (value, n) => `${value.slice(0, -1)}${'1'.repeat(n)}!`,
+    ],
+  ];
+  /** How a client (the advertised pattern) or the server (its parse) decides a field's input. */
+  const surfaces: [string, (field: Field) => (input: string) => boolean][] = [
+    [
+      'client pattern',
+      (field) => {
+        const client = new RegExp(patternOf(field) ?? '');
+        return (input) => client.test(input);
+      },
+    ],
+    [
+      'client pattern with the u flag',
+      (field) => {
+        const unicode = new RegExp(patternOf(field) ?? '', 'u');
+        return (input) => unicode.test(input);
+      },
+    ],
+    [
+      'server parse',
+      (field) => {
+        const parser = parserOf(field);
+        return (input) => parser.safeParse(input).success;
+      },
+    ],
+  ];
+  it.each(
+    Object.entries(FORMATS).flatMap(([name, format]) =>
+      shapes.flatMap(([shape, around]) =>
+        surfaces.map(
+          ([surface, decider]) => [name, shape, surface, format, around, decider] as const,
+        ),
+      ),
+    ),
+  )(
+    'decides %s input shaped as %s through the %s in time linear in its length',
+    (name, _shape, _surface, format, around, decider) => {
+      const admits = decider(format.fields[0] as Field);
       const value = accepted[name] as string;
-      const builds: ((n: number) => string)[] = [
-        (n) => `${'§1 x'.repeat(n / 4)}\ny`,
-        (n) => '  \r\n'.repeat(n / 4),
-        (n) => `${' '.repeat(n)}x`,
-        (n) => `${value}${' '.repeat(n)}x`,
-        (n) => `${' '.repeat(n / 2)}${value}${' '.repeat(n / 2)}x`,
-        (n) => `${value.slice(0, -1)}${'1'.repeat(n)}!`,
-      ];
-      const pattern = patternOf(format.fields[0] as Field) ?? '';
-      const client = new RegExp(pattern);
-      const unicode = new RegExp(pattern, 'u');
-      const parser = parserOf(format.fields[0] as Field);
-      const surfaces: ((input: string) => boolean)[] = [
-        (input) => client.test(input),
-        (input) => unicode.test(input),
-        (input) => parser.safeParse(input).success,
-      ];
-      for (const [shape, build] of builds.entries())
-        for (const [surface, admits] of surfaces.entries()) {
-          const run = (input: string) => () => {
-            admits(input);
-          };
-          cpu(run(build(sizes[0] as number)), 20);
-          const perCall: number[] = [];
-          for (const size of sizes) {
-            const input = build(size);
-            const label = `shape ${shape}, surface ${surface}, ${size} characters`;
-            // Only a blank reaches an optional field's handler; every other input here is refused.
-            expect(admits(input), label).toBe(format.pattern.endsWith('?$') && !input.trim());
-            expect(cpu(run(input), 1), label).toBeLessThan(250_000);
-            perCall.push(cpu(run(input), Math.max(1, (sizes.at(-1) as number) / size)));
-          }
-          expect(
-            (perCall.at(-1) as number) / (perCall[0] as number),
-            `shape ${shape}, surface ${surface}`,
-          ).toBeLessThan(256);
-        }
+      const build = (n: number) => around(value, n);
+      expectLinearCpu(admits, build, sizes);
+      /**
+       * Checked after the timing, so a super-linear surface stops at its first slow size. Only a
+       * blank reaches an optional field's handler; every other input here is refused.
+       */
+      for (const size of sizes) {
+        const input = build(size);
+        expect(admits(input), `${size} characters`).toBe(
+          format.pattern.endsWith('?$') && !input.trim(),
+        );
+      }
     },
   );
 });

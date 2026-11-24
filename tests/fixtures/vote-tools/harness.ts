@@ -126,17 +126,17 @@ function domainParity(result: ToolResult, definition: Definition) {
   assertDomainParity(body, definition.format!(body as never));
   return data;
 }
-/** Budgeted ballot page: domain parity, every enrichment field exact, measure equal to the wire. */
+/** Ballot page: domain parity, every enrichment field exact, measure equal to the wire. */
 export function ballotParity(result: ToolResult, definition: Definition) {
   const data = domainParity(result, definition);
-  assertMeasuredResponse(result, definition, data.ballots as unknown[]);
+  assertMeasuredResponse(result, definition);
   return data;
 }
 /** Check actual CommonMark leaves for both the tool body and every enrichment value. */
 export function parity(result: ToolResult, definition: Definition) {
   const data = domainParity(result, definition);
   if (definition.enrichmentTrailer?.shown?.render) {
-    assertMeasuredResponse(result, definition, data.divisions as unknown[]);
+    assertMeasuredResponse(result, definition);
     return data;
   }
   expectExact(trailerFields(result.content.slice(1)).appliedFilters, data.appliedFilters);

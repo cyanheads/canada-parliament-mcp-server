@@ -28,6 +28,7 @@ import {
   assertFilterRejection,
   type FilterRejection,
 } from '../fixtures/filter-rejection.js';
+import { parliamentRosterUrl, realRoster } from '../fixtures/member-tools/harness.js';
 import { collection, rawPerson, rosterUrl } from '../fixtures/vote-tools/harness.js';
 
 const rows = [
@@ -135,43 +136,48 @@ describe('canparl_search_bills production contract', () => {
     ]);
   });
   it.each([1500, 15000])(
-    'fits whole bill records with repeated %i-character titles',
+    'returns every whole bill record with repeated %i-character titles in one page',
     async (size) => {
       const title = 'é'.repeat(size);
       feed(Array.from({ length: 8 }, (_, i) => rawBill(`C-${i + 1}`, { LongTitleEn: title })));
-      const ids: string[] = [];
-      let offset: number | null = 0;
-      let pages = 0;
-      do {
-        const result = await call({ session: '45-1', limit: 10_000, offset });
-        expect(result.isError).not.toBe(true);
-        const data = result.structuredContent as {
-          bills: { billCode: string; longTitle: { en: string } }[];
-          pagination: { nextOffset: number | null };
-        };
-        const bytes = assertMeasuredResponse(result, searchBillsTool, data.bills);
-        check(result);
-        expect(data.bills.length).toBeGreaterThan(0);
-        expect(result.structuredContent).toMatchObject({
-          total: 8,
-          cap: 100,
-          notice: expect.stringContaining('maximum of 100'),
-        });
-        for (const row of data.bills) expect(row.longTitle.en).toBe(title);
-        if (bytes > 24_000)
-          expect(result.structuredContent).toMatchObject({
-            shown: 1,
-            notice: expect.stringContaining('exceeds'),
-          });
-        ids.push(...data.bills.map((row) => row.billCode));
-        offset = data.pagination.nextOffset;
-        if (offset !== null) expect(offset).toBe(ids.length);
-        expect(++pages).toBeLessThanOrEqual(8);
-      } while (offset !== null);
-      expect(pages).toBeGreaterThan(1);
-      expect(ids).toEqual(Array.from({ length: 8 }, (_, i) => `C-${i + 1}`));
+      const result = await call({ session: '45-1', limit: 10_000 });
+      const data = check(result) as { bills: { billCode: string; longTitle: { en: string } }[] };
+      expect(assertMeasuredResponse(result, searchBillsTool)).toBeGreaterThan(24_000);
+      expect(result.structuredContent).toMatchObject({
+        total: 8,
+        shown: 8,
+        cap: 100,
+        truncated: false,
+        pagination: { offset: 0, limit: 100, nextOffset: null, hasMore: false },
+        notice: 'limit 10000 exceeds the per-call maximum of 100; returned up to 100.',
+      });
+      for (const row of data.bills) expect(row.longTitle.en).toBe(title);
+      expect(data.bills.map((row) => row.billCode)).toEqual(
+        Array.from({ length: 8 }, (_, i) => `C-${i + 1}`),
+      );
     },
   );
+  it('continues heavy records by limit alone, returning each exactly once', async () => {
+    const title = 'é'.repeat(15_000);
+    feed(Array.from({ length: 8 }, (_, i) => rawBill(`C-${i + 1}`, { LongTitleEn: title })));
+    const ids: string[] = [];
+    const sizes: number[] = [];
+    let offset: number | null = 0;
+    do {
+      const result = await call({ session: '45-1', limit: 3, offset });
+      const data = check(result) as {
+        bills: { billCode: string }[];
+        pagination: { nextOffset: number | null };
+      };
+      expect(data).not.toHaveProperty('notice');
+      sizes.push(data.bills.length);
+      ids.push(...data.bills.map((row) => row.billCode));
+      offset = data.pagination.nextOffset;
+      if (offset !== null) expect(offset).toBe(ids.length);
+    } while (offset !== null);
+    expect(sizes).toEqual([3, 3, 2]);
+    expect(ids).toEqual(Array.from({ length: 8 }, (_, i) => `C-${i + 1}`));
+  });
   it.each([
     ['House', 'C-901'],
     ['Senate', 'S-902'],
@@ -429,7 +435,7 @@ describe('canparl_search_bills production contract', () => {
     });
     expect(http.calls.map((c) => c.request.url)).not.toContain(current);
   });
-  it('returns 10 rows by default inside the byte budget that ends an explicit 25-row page', async () => {
+  it('returns 10 rows by default and the whole explicit 25-row page', async () => {
     feed(Array.from({ length: 30 }, (_, i) => rawBill(`C-${i + 1}`)));
     const byDefault = check(await call({ session: '45-1' }));
     expect(byDefault).toMatchObject({
@@ -440,30 +446,28 @@ describe('canparl_search_bills production contract', () => {
       pagination: { offset: 0, limit: 10, nextOffset: 10, hasMore: true },
     });
     expect(byDefault.notice).toBeUndefined();
-    expect(check(await call({ session: '45-1', limit: 25 }))).toMatchObject({
-      shown: 21,
+    const explicit = check(await call({ session: '45-1', limit: 25 }));
+    expect(explicit).toMatchObject({
+      shown: 25,
       cap: 25,
-      pagination: { limit: 25, nextOffset: 21 },
-      notice: expect.stringContaining('24000-byte response budget'),
+      truncated: true,
+      pagination: { limit: 25, nextOffset: 25, hasMore: true },
     });
+    expect(explicit.notice).toBeUndefined();
   });
-  it('preserves the 100-row cap while applying the disclosed byte budget', async () => {
+  it('returns the whole 100-row cap past 24000 bytes', async () => {
     feed(Array.from({ length: 100 }, (_, i) => rawBill(`C-${100 - i}`)));
     const result = await call({ session: '45-1', limit: 100 });
-    check(result);
+    const data = check(result);
     expect(result.structuredContent).toMatchObject({
       total: 100,
-      shown: 21,
+      shown: 100,
       cap: 100,
-      truncated: true,
-      pagination: { hasMore: true, nextOffset: 21 },
-      notice: expect.stringContaining('24000-byte response budget'),
+      truncated: false,
+      pagination: { hasMore: false, nextOffset: null },
     });
-    assertMeasuredResponse(
-      result,
-      searchBillsTool,
-      (result.structuredContent as { bills: unknown[] }).bills,
-    );
+    expect(data.notice).toBeUndefined();
+    expect(assertMeasuredResponse(result, searchBillsTool)).toBeGreaterThan(24_000);
   });
   it.each([150, 10_000])(
     'clamps limit %i to the 100-row cap and continues from nextOffset',
@@ -471,6 +475,7 @@ describe('canparl_search_bills production contract', () => {
       feed(Array.from({ length: 150 }, (_, i) => rawBill(`C-${i + 1}`)));
       const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
       const ids: string[] = [];
+      const sizes: number[] = [];
       let offset: number | null = 0;
       do {
         const result = await call({ session: '45-1', limit, offset });
@@ -478,19 +483,20 @@ describe('canparl_search_bills production contract', () => {
           bills: { billCode: string }[];
           pagination: { nextOffset: number | null };
         };
-        assertMeasuredResponse(result, searchBillsTool, data.bills);
+        assertMeasuredResponse(result, searchBillsTool);
         expect(result.structuredContent).toMatchObject({
           total: 150,
           cap: 100,
-          notice: expect.stringContaining(notice),
+          notice,
           pagination: { offset, limit: 100 },
         });
-        expect(data.bills.length).toBeGreaterThan(0);
+        sizes.push(data.bills.length);
         ids.push(...data.bills.map((row) => row.billCode));
         offset = data.pagination.nextOffset;
         if (offset !== null) expect(offset).toBe(ids.length);
         expect(ids.length).toBeLessThanOrEqual(150);
       } while (offset !== null);
+      expect(sizes).toEqual([100, 50]);
       expect(ids).toEqual(Array.from({ length: 150 }, (_, i) => `C-${i + 1}`));
     },
   );
@@ -805,6 +811,10 @@ describe('canparl_search_bills sponsor identity', () => {
     expectExact(trailerFields(result.content.slice(1)).appliedFilters, structured.appliedFilters);
     return structured;
   }
+  const everyoneUrl = parliamentRosterUrl('*');
+  /** Captured all-Parliaments roster, holding former MP 1463 Jim Abbott. */
+  const everyone = () =>
+    http.route({ match: everyoneUrl, respond: new Response(realRoster('all')) });
 
   it('filters by the verified profile when sponsor is a current personId', async () => {
     roster(2897);
@@ -893,7 +903,7 @@ describe('canparl_search_bills sponsor identity', () => {
   );
   it('describes how sponsor reads a current personId', () => {
     expect(searchBillsTool.input.shape.sponsor.description).toBe(
-      "MP OpenParliament slug or politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId; Senators are not indexed. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
+      "MP OpenParliament slug or politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId; Senators are not indexed. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId. Any other digit-only value is an OpenParliament ID; a notice names the former MP whose personId it also is.",
     );
   });
   it.each([
@@ -941,6 +951,7 @@ describe('canparl_search_bills sponsor identity', () => {
   });
   it('keeps a numeric sponsor absent from the roster as an OpenParliament ID, read after the roster', async () => {
     roster(1);
+    everyone();
     politician('/politicians/5724/', { name: 'Numeric Example' });
     indexed('/politicians/5724/', [['C-2']]);
     const data = contract(await call({ sponsor: 'https://openparliament.ca/politicians/5724/' }));
@@ -954,9 +965,11 @@ describe('canparl_search_bills sponsor identity', () => {
         .filter((url) => new URL(url).origin === api || url === rosterUrl)
         .slice(0, 2),
     ).toEqual([rosterUrl, `${api}/politicians/5724/`]);
+    expect(data.notice).not.toContain('former MP');
   });
   it('fails sponsor_not_found when a numeric sponsor answers with another canonical profile', async () => {
     roster(1);
+    everyone();
     politician('/politicians/413/', { url: river });
     assertError(
       await call({ sponsor: '413' }),
@@ -965,6 +978,50 @@ describe('canparl_search_bills sponsor identity', () => {
       notFound.recovery,
     );
     expect(urls().some((url) => new URL(url).pathname === '/bills/')).toBe(false);
+  });
+  it.each<[Record<string, number>, string]>([
+    [{}, ''],
+    [{ limit: 150 }, 'limit 150 exceeds the per-call maximum of 100; returned up to 100. '],
+  ])(
+    'names the former MP whose personId a numeric sponsor URL also is, before the other notices, with %j',
+    async (input, clamp) => {
+      roster(1);
+      everyone();
+      // OpenParliament answers /politicians/1463/ with an unrelated, membership-less profile.
+      politician('/politicians/1463/', { name: 'Wendy Walker' });
+      indexed('/politicians/1463/', [[]]);
+      const result = await call({
+        sponsor: 'https://openparliament.ca/politicians/1463/',
+        ...input,
+      });
+      const data = contract(result);
+      expect(data).toMatchObject({
+        total: 0,
+        appliedFilters: { sponsor: '1463', sponsorName: 'Wendy Walker' },
+        provenance: expect.arrayContaining([expect.objectContaining({ url: everyoneUrl })]),
+      });
+      expect(data.notice).toBe(
+        `1463 was read as OpenParliament's Wendy Walker; it is also the official personId of former MP Jim Abbott. For that member, call canparl_get_member with personId 1463 and pass its member.slug as sponsor; a null member.slug means OpenParliament holds no verified profile. ${clamp}No bills matched the applied filters; remove titleContains, status, or billType and retry canparl_search_bills. Sponsor coverage is limited to OpenParliament's index, which may lag and does not index Senators as politicians; use canparl_search_bills without sponsor and canparl_get_bill to check official sponsors.`,
+      );
+      expectExact(trailerFields(result.content.slice(1)).notice, data.notice);
+    },
+  );
+  it('routes a numeric sponsor holding no profile but a former personId to canparl_get_member', async () => {
+    roster(1);
+    everyone();
+    http.route({
+      match: `${api}/politicians/1463/`,
+      respond: new Response('', { status: 404 }),
+    });
+    assertError(
+      await call({ sponsor: '1463' }),
+      'sponsor_not_found',
+      JsonRpcErrorCode.NotFound,
+      "The sponsor value matches no OpenParliament profile, but its digits are a former MP's official personId; call canparl_get_member with those digits as personId and pass its member.slug as sponsor; a null member.slug means OpenParliament holds no verified profile.",
+    );
+    expect(
+      urls().filter((url) => new URL(url).origin === api || url.startsWith(rosterUrl)),
+    ).toEqual([rosterUrl, `${api}/politicians/1463/`, everyoneUrl]);
   });
   it('names a slug sponsor without reading the roster, and echoes null without a sponsor', async () => {
     politician(river);
@@ -979,6 +1036,7 @@ describe('canparl_search_bills sponsor identity', () => {
   });
   it('reuses the cached roster on a later digit-only sponsor call', async () => {
     roster(1);
+    everyone();
     politician('/politicians/5724/', { name: 'Numeric Example' });
     indexed('/politicians/5724/', [['C-2']]);
     contract(await call({ sponsor: '5724' }));
@@ -986,6 +1044,10 @@ describe('canparl_search_bills sponsor identity', () => {
     expect(urls().filter((url) => url === rosterUrl)).toHaveLength(1);
     expect(second.provenance).toEqual(
       expect.arrayContaining([expect.objectContaining({ url: rosterUrl, cached: true })]),
+    );
+    expect(urls().filter((url) => url === everyoneUrl)).toHaveLength(1);
+    expect(second.provenance).toEqual(
+      expect.arrayContaining([expect.objectContaining({ url: everyoneUrl, cached: true })]),
     );
   });
   it('completes the cold maximum 14 OpenParliament operations for a current personId sponsor', async () => {

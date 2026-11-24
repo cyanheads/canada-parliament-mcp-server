@@ -2,18 +2,25 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { PROVINCES } from '@/domain/normalization.js';
+import { POSTAL_CODE_FORMAT, PROVINCES } from '@/domain/normalization.js';
 import { PARTIES } from '@/domain/reference-catalog.js';
+import { getVoteTool } from '@/mcp-server/tools/definitions/get-vote.tool.js';
 import { searchMembersTool } from '@/mcp-server/tools/definitions/search-members.tool.js';
 import { assertMeasuredResponse } from '../fixtures/bill-tools/harness.js';
-import { assertFilterRejection, type FilterRejection } from '../fixtures/filter-rejection.js';
+import {
+  assertArgumentRejection,
+  assertFilterRejection,
+  type FilterRejection,
+} from '../fixtures/filter-rejection.js';
 import {
   collection,
   failure,
   page,
   parity,
   parliamentRosterUrl,
+  postalLookupUrl,
   rawPerson,
+  realPostalLookup,
   realRoster,
   rosterPicker,
   rosterUrl,
@@ -56,21 +63,17 @@ describe('canparl_search_members production contract', () => {
     [false, 15000],
     [true, 15000],
   ] as const)(
-    'fits current/historical mode %j with %i-character names and resumes every whole row',
+    'returns every whole current/historical mode %j row with %i-character names in one page',
     async (includeFormer, size) => {
       const name = 'é'.repeat(size);
-      if (includeFormer) {
-        for (let offset = 0; offset < 8; offset++)
-          page(
-            http,
-            '/politicians/',
-            { limit: 100, offset, include: 'all' },
-            Array.from({ length: 8 - offset }, (_, i) => ({
-              name,
-              url: `/politicians/member-${offset + i + 1}/`,
-            })),
-          );
-      } else
+      if (includeFormer)
+        page(
+          http,
+          '/politicians/',
+          { limit: 100, offset: 0, include: 'all' },
+          Array.from({ length: 8 }, (_, i) => ({ name, url: `/politicians/member-${i + 1}/` })),
+        );
+      else
         http.route({
           match: rosterUrl,
           respond: new Response(
@@ -86,35 +89,74 @@ describe('canparl_search_members production contract', () => {
             ),
           ),
         });
-      const ids: string[] = [];
+      const result = await call({ includeFormer, limit: 10_000 });
+      const data = parity(result, searchMembersTool) as {
+        members: { personId: string | null; slug: string | null; name: string }[];
+      };
+      expect(assertMeasuredResponse(result, searchMembersTool)).toBeGreaterThan(24_000);
+      expect(result.structuredContent).toMatchObject({
+        total: includeFormer ? null : 8,
+        shown: 8,
+        cap: 100,
+        truncated: false,
+        pagination: { offset: 0, limit: 100, nextOffset: null, hasMore: false },
+        notice: 'limit 10000 exceeds the per-call maximum of 100; returned up to 100.',
+      });
+      for (const row of data.members)
+        expect(row.name).toBe(includeFormer ? name : `${name} Repeated`);
+      expect(data.members.map((row) => (includeFormer ? row.slug : row.personId))).toEqual(
+        Array.from({ length: 8 }, (_, i) => (includeFormer ? `member-${i + 1}` : String(i + 1))),
+      );
+    },
+  );
+  it.each([false, true])(
+    'continues heavy current/historical mode %j rows by limit alone, returning each exactly once',
+    async (includeFormer) => {
+      const name = 'é'.repeat(15_000);
+      if (includeFormer)
+        for (const offset of [0, 3, 6])
+          page(
+            http,
+            '/politicians/',
+            { limit: 3, offset, include: 'all' },
+            Array.from({ length: Math.min(3, 8 - offset) }, (_, i) => ({
+              name,
+              url: `/politicians/member-${offset + i + 1}/`,
+            })),
+            offset === 6 ? null : offset + 3,
+          );
+      else
+        http.route({
+          match: rosterUrl,
+          respond: new Response(
+            collection(
+              'ArrayOfMemberOfParliament',
+              'MemberOfParliament',
+              Array.from({ length: 8 }, (_, i) =>
+                rawPerson(i + 1, {
+                  PersonOfficialFirstName: name,
+                  PersonOfficialLastName: 'Repeated',
+                }),
+              ),
+            ),
+          ),
+        });
+      const ids: (string | null)[] = [];
+      const sizes: number[] = [];
       let offset: number | null = 0;
-      let pages = 0;
       do {
-        const result = await call({ includeFormer, limit: 10_000, offset });
+        const result = await call({ includeFormer, limit: 3, offset });
         const data = parity(result, searchMembersTool) as {
-          members: { personId: string | null; slug: string | null; name: string }[];
+          members: { personId: string | null; slug: string | null }[];
           pagination: { nextOffset: number | null };
         };
-        const bytes = assertMeasuredResponse(result, searchMembersTool, data.members);
-        if (bytes > 24_000)
-          expect(result.structuredContent).toMatchObject({
-            shown: 1,
-            notice: expect.stringContaining('exceeds'),
-          });
-        expect(data.members.length).toBeGreaterThan(0);
-        expect(result.structuredContent).toMatchObject({
-          total: includeFormer ? null : 8,
-          cap: 100,
-          notice: expect.stringContaining('maximum of 100'),
-        });
-        for (const row of data.members)
-          expect(row.name).toBe(includeFormer ? name : `${name} Repeated`);
-        ids.push(...data.members.map((row) => (includeFormer ? row.slug! : row.personId!)));
+        expect(data).not.toHaveProperty('notice');
+        sizes.push(data.members.length);
+        ids.push(...data.members.map((row) => (includeFormer ? row.slug : row.personId)));
         offset = data.pagination.nextOffset;
         if (offset !== null) expect(offset).toBe(ids.length);
-        expect(++pages).toBeLessThanOrEqual(8);
       } while (offset !== null);
-      expect(pages).toBeGreaterThan(1);
+      expect(sizes).toEqual([3, 3, 2]);
       expect(ids).toEqual(
         Array.from({ length: 8 }, (_, i) => (includeFormer ? `member-${i + 1}` : String(i + 1))),
       );
@@ -127,7 +169,7 @@ describe('canparl_search_members production contract', () => {
     [{ offset: 3 }, []],
     [{ offset: 9 }, []],
     [{ name: 'absent' }, []],
-    [{ name: '', riding: ' ', province: '', party: ' ' }, ['1', '2', '3']],
+    [{ name: '', riding: ' ', province: '', party: ' ', postalCode: ' ' }, ['1', '2', '3']],
   ])('filters the complete roster before paging %j', async (input, ids) => {
     roster();
     const result = await call(input);
@@ -145,7 +187,12 @@ describe('canparl_search_members production contract', () => {
     expect(data).toMatchObject({
       cap: 'limit' in input ? input.limit : 25,
       shown: ids.length,
-      appliedFilters: { includeFormer: false, parliament: null, nameMode: 'substring' },
+      appliedFilters: {
+        includeFormer: false,
+        parliament: null,
+        nameMode: 'substring',
+        postalCode: null,
+      },
     });
   });
   it('intersects Unicode literal name/riding with province and caucus aliases', async () => {
@@ -200,6 +247,7 @@ describe('canparl_search_members production contract', () => {
     });
     const notice = `limit ${limit} exceeds the per-call maximum of 100; returned up to 100.`;
     const ids: string[] = [];
+    const sizes: number[] = [];
     let offset: number | null = 0;
     do {
       const result = await call({ limit, offset });
@@ -207,19 +255,20 @@ describe('canparl_search_members production contract', () => {
         members: { personId: string }[];
         pagination: { nextOffset: number | null };
       };
-      assertMeasuredResponse(result, searchMembersTool, data.members);
+      assertMeasuredResponse(result, searchMembersTool);
       expect(result.structuredContent).toMatchObject({
         total: 150,
         cap: 100,
-        notice: expect.stringContaining(notice),
+        notice,
         pagination: { offset, limit: 100 },
       });
-      expect(data.members.length).toBeGreaterThan(0);
+      sizes.push(data.members.length);
       ids.push(...data.members.map((row) => row.personId));
       offset = data.pagination.nextOffset;
       if (offset !== null) expect(offset).toBe(ids.length);
       expect(ids.length).toBeLessThanOrEqual(150);
     } while (offset !== null);
+    expect(sizes).toEqual([100, 50]);
     expect(ids).toEqual(Array.from({ length: 150 }, (_, i) => String(i + 1)));
   });
   it.each([150, 10_000])(
@@ -279,24 +328,23 @@ describe('canparl_search_members production contract', () => {
       notice: expect.stringContaining('offset 0'),
     });
   });
-  it('resumes inside a shortened historical page before following its source gap', async () => {
-    const rows = Array.from({ length: 4 }, (_, i) => ({
-      name: 'é'.repeat(1500),
-      url: `/politicians/gap-${i + 7}/`,
-    }));
-    for (let offset = 7; offset < 11; offset++)
-      page(
-        http,
-        '/politicians/',
-        { limit: 100, offset, include: 'all' },
-        rows.slice(offset - 7),
-        12,
-      );
+  it('carries the source gap and terminal null from whole heavy historical pages', async () => {
+    page(
+      http,
+      '/politicians/',
+      { limit: 100, offset: 7, include: 'all' },
+      Array.from({ length: 4 }, (_, i) => ({
+        name: 'é'.repeat(1500),
+        url: `/politicians/gap-${i + 7}/`,
+      })),
+      12,
+    );
     page(http, '/politicians/', { limit: 100, offset: 12, include: 'all' }, [
       { name: 'Final', url: '/politicians/gap-12/' },
     ]);
     const ids: string[] = [];
     const offsets: number[] = [];
+    const wires: number[] = [];
     let offset: number | null = 7;
     do {
       offsets.push(offset);
@@ -305,13 +353,15 @@ describe('canparl_search_members production contract', () => {
         members: { slug: string }[];
         pagination: { nextOffset: number | null };
       };
-      assertMeasuredResponse(result, searchMembersTool, data.members);
+      expect(data).not.toHaveProperty('notice');
+      wires.push(assertMeasuredResponse(result, searchMembersTool));
       ids.push(...data.members.map((row) => row.slug));
       offset = data.pagination.nextOffset;
       expect(offsets.length).toBeLessThanOrEqual(5);
     } while (offset !== null);
     expect(ids).toEqual(['gap-7', 'gap-8', 'gap-9', 'gap-10', 'gap-12']);
-    expect(offsets).toEqual([7, 10, 12]);
+    expect(offsets).toEqual([7, 12]);
+    expect(wires[0]).toBeGreaterThan(24_000);
   });
   const provinces = [...Object.values(PROVINCES), ...Object.keys(PROVINCES)];
   it.each<[Record<string, string>, FilterRejection]>([
@@ -361,7 +411,7 @@ describe('canparl_search_members production contract', () => {
           detailLookup: { slug: 'river-example' },
         },
       ],
-      appliedFilters: { nameMode },
+      appliedFilters: { nameMode, postalCode: null },
       pagination: { nextOffset: 12, hasMore: true },
       shown: 1,
       cap: 1,
@@ -420,7 +470,7 @@ describe('canparl_search_members production contract', () => {
             detailLookup: { personId: '58733' },
           },
         ],
-        appliedFilters: { includeFormer: false, parliament: 41, name: 'Trudeau' },
+        appliedFilters: { includeFormer: false, parliament: 41, name: 'Trudeau', postalCode: null },
       });
       expect(urls()).toEqual([rosterPicker, parliamentRosterUrl(41), rosterUrl]);
       expect((data.provenance as { url: string }[]).map((source) => source.url)).toEqual([
@@ -506,7 +556,7 @@ describe('canparl_search_members production contract', () => {
         });
         if (!expected.length)
           expect(data.notice).toBe(
-            'No MPs matched; broaden name or riding and retry canparl_search_members.',
+            'No MPs matched; broaden or remove a filter and retry canparl_search_members.',
           );
       },
     );
@@ -597,6 +647,247 @@ describe('canparl_search_members production contract', () => {
       expect(member.from.description).toContain('FromDateTime as published');
       expect(member.to.description).toContain('ToDateTime as published; null while sitting');
       expect(searchMembersTool.input.shape.parliament.description).toContain('36th onward');
+    });
+  });
+  describe('postal codes', () => {
+    const urls = () => http.calls.map((entry) => entry.request.url);
+    type Row = Record<string, unknown> & { personId: string };
+    const ids = (data: Record<string, unknown>) =>
+      (data.members as Row[]).map((row) => row.personId);
+    const people: Record<string, Record<string, unknown>> = {
+      110572: {
+        PersonOfficialFirstName: 'Yasir',
+        PersonOfficialLastName: 'Naqvi',
+        ConstituencyName: 'Ottawa Centre',
+      },
+      122850: {
+        PersonOfficialFirstName: 'Bruce',
+        PersonOfficialLastName: 'Fanjoy',
+        ConstituencyName: 'Carleton',
+      },
+      110459: {
+        PersonOfficialFirstName: 'Jenna',
+        PersonOfficialLastName: 'Sudds',
+        ConstituencyName: 'Kanata',
+      },
+      72029: {
+        PersonOfficialFirstName: 'Dan',
+        PersonOfficialLastName: 'Albas',
+        ConstituencyName: 'Okanagan Lake West—South Kelowna',
+        ConstituencyProvinceTerritoryName: 'British Columbia',
+        CaucusShortName: 'Conservative',
+      },
+    };
+    /**
+     * Current roster holding the captured lookups' members, or only `only`; 72029 no lookup names.
+     * `changed` replaces fields of a member's roster row, the row the filters read.
+     */
+    const sitting = (
+      only = Object.keys(people),
+      changed: Record<string, Record<string, unknown>> = {},
+    ) =>
+      http.route({
+        match: rosterUrl,
+        respond: () =>
+          new Response(
+            collection(
+              'ArrayOfMemberOfParliament',
+              'MemberOfParliament',
+              only.map((id) => rawPerson(Number(id), { ...people[id], ...changed[id] })),
+            ),
+          ),
+      });
+    const lookup = (code: 'K1A0A6' | 'K0A1L0' | 'Z9Z9Z9') =>
+      http.route({
+        match: postalLookupUrl(code),
+        respond: () =>
+          new Response(realPostalLookup(code.toLowerCase() as 'k1a0a6' | 'k0a1l0' | 'z9z9z9')),
+      });
+    const noSitting =
+      'No sitting MP matched this postal code: it is unassigned, or its riding is vacant. Check the code, or retry canparl_search_members with riding set to the riding name.';
+    const noMatch = 'No MPs matched; broaden or remove a filter and retry canparl_search_members.';
+    it('reads every spelling of K1A 0A6 as one canonical lookup beside the cached roster', async () => {
+      sitting();
+      lookup('K1A0A6');
+      for (const [i, postalCode] of ['K1A 0A6', 'k1a0a6', 'K1A-0A6', 'K1A 0A6'].entries()) {
+        const data = parity(await call({ postalCode }), searchMembersTool);
+        expect(data).toMatchObject({
+          total: 1,
+          totalCount: 1,
+          members: [
+            {
+              personId: '110572',
+              slug: null,
+              name: 'Yasir Naqvi',
+              riding: 'Ottawa Centre',
+              current: true,
+              detailLookup: { personId: '110572' },
+            },
+          ],
+          appliedFilters: { includeFormer: false, parliament: null, postalCode: 'K1A0A6' },
+          shown: 1,
+          truncated: false,
+        });
+        expect(data).not.toHaveProperty('notice');
+        expect(
+          (data.provenance as { url: string; cached: boolean }[]).map((source) => [
+            source.url,
+            source.cached,
+          ]),
+        ).toEqual([
+          [postalLookupUrl('K1A0A6'), i > 0],
+          [rosterUrl, i > 0],
+        ]);
+      }
+      expect(urls()).toEqual([postalLookupUrl('K1A0A6'), rosterUrl]);
+    });
+    /** 122850's roster row in another caucus and province, so caucus and province split the code. */
+    const split = {
+      122850: { CaucusShortName: 'Conservative', ConstituencyProvinceTerritoryName: 'Quebec' },
+    };
+    it.each<[Record<string, string>, string[], Record<string, Record<string, unknown>>?]>([
+      [{}, ['122850', '110459']],
+      [{ riding: 'Kanata' }, ['110459']],
+      [{ name: 'jenna', party: 'Liberal', province: 'ON' }, ['110459']],
+      [{ party: 'Conservative' }, ['122850'], split],
+      [{ party: 'Liberal' }, ['110459'], split],
+      [{ province: 'QC' }, ['122850'], split],
+      [{ province: 'ON' }, ['110459'], split],
+      [{ province: 'BC' }, []],
+    ])(
+      'returns every sitting MP of a code spanning ridings, ANDed with %j',
+      async (input, expected, changed) => {
+        sitting(undefined, changed);
+        lookup('K0A1L0');
+        const data = parity(await call({ postalCode: 'K0A 1L0', ...input }), searchMembersTool);
+        expect(ids(data)).toEqual(expected);
+        expect(data).toMatchObject({
+          total: expected.length,
+          appliedFilters: { postalCode: 'K0A1L0' },
+        });
+      },
+    );
+    it('pages the postal rows with an exact total', async () => {
+      sitting();
+      lookup('K0A1L0');
+      const data = parity(
+        await call({ postalCode: 'K0A1L0', limit: 1, offset: 1 }),
+        searchMembersTool,
+      );
+      expect(ids(data)).toEqual(['110459']);
+      expect(data).toMatchObject({
+        total: 2,
+        pagination: { offset: 1, limit: 1, nextOffset: null, hasMore: false },
+      });
+      expect(data).not.toHaveProperty('notice');
+      const pastEnd = parity(await call({ postalCode: 'K0A1L0', offset: 2 }), searchMembersTool);
+      expect(pastEnd).toMatchObject({
+        total: 2,
+        members: [],
+        pagination: { offset: 2, nextOffset: null, hasMore: false },
+        notice: 'Retry canparl_search_members with offset 0 and the same filters.',
+      });
+    });
+    it('drops a lookup row whose personId is not on the current roster', async () => {
+      sitting(['110459', '72029']);
+      lookup('K0A1L0');
+      const data = parity(await call({ postalCode: 'K0A1L0' }), searchMembersTool);
+      expect(ids(data)).toEqual(['110459']);
+      expect(data.total).toBe(1);
+    });
+    it.each<[string, 'K1A0A6' | 'Z9Z9Z9', string[] | undefined, Record<string, string>, string]>([
+      ['an unassigned code', 'Z9Z9Z9', undefined, {}, noSitting],
+      ['a code whose one member is off the current roster', 'K1A0A6', ['72029'], {}, noSitting],
+      [
+        'a code whose members the other filters exclude',
+        'K1A0A6',
+        undefined,
+        { riding: 'Kanata' },
+        noMatch,
+      ],
+    ])('returns an empty page with its notice for %s', async (_case, code, only, input, notice) => {
+      sitting(only);
+      lookup(code);
+      const data = parity(await call({ postalCode: code, ...input }), searchMembersTool);
+      expect(data).toMatchObject({
+        total: 0,
+        members: [],
+        appliedFilters: { postalCode: code },
+        pagination: { nextOffset: null, hasMore: false },
+        notice,
+      });
+    });
+    it.each<[string, string]>([
+      ['K1A', ''],
+      ['K1A0A', 'K1A0A'],
+      ['K1A0A67', 'K1A0A67'],
+      ['K1A  0A6', 'K1A  0A6'],
+      ['1A1A1A', '1A1A1A'],
+    ])('rejects postalCode %j at the schema before any request', async (postalCode, rejected) => {
+      assertArgumentRejection(await call({ postalCode }), {
+        lines: [`postalCode: ${POSTAL_CODE_FORMAT.expectation}`],
+        rejected,
+      });
+      expect(http.calls).toHaveLength(0);
+    });
+    it.each<Record<string, unknown>>([
+      { includeFormer: true },
+      { parliament: 41 },
+      { includeFormer: true, parliament: 41, riding: 'Ottawa' },
+    ])('rejects postalCode with %j before any request', async (input) => {
+      const result = await call({ postalCode: 'K1A 0A6', ...input });
+      failure(result, searchMembersTool.errors![0]!);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          message:
+            'postalCode searches the current roster only, so it cannot be combined with includeFormer or parliament.',
+        },
+      });
+      expect(http.calls).toHaveLength(0);
+    });
+    it.each<[string, (request: Request) => Response | Promise<Response>, number]>([
+      [
+        'HTTP 503 on every attempt',
+        () => new Response('', { status: 503 }),
+        JsonRpcErrorCode.ServiceUnavailable,
+      ],
+      [
+        'malformed XML',
+        () =>
+          new Response(
+            '<ArrayOfMemberOfParliament><MemberOfParliament><PersonId>x</PersonId></MemberOfParliament></ArrayOfMemberOfParliament>',
+          ),
+        JsonRpcErrorCode.SerializationError,
+      ],
+      [
+        'a stalled response',
+        (request) =>
+          new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+              once: true,
+            });
+          }),
+        JsonRpcErrorCode.Timeout,
+      ],
+    ])('fails the call on %s, never falling back to the roster', async (_case, respond, code) => {
+      sitting();
+      http.route({ match: postalLookupUrl('K1A0A6'), respond });
+      const result = await call({ postalCode: 'K1A 0A6' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: { code } });
+      expect(result.structuredContent).not.toHaveProperty('members');
+      expect(new Set(urls())).toEqual(new Set([postalLookupUrl('K1A0A6')]));
+    });
+    it('names postal codes on the tool and calls province values abbreviations on both tools', () => {
+      expect(searchMembersTool.description).toContain('postal code');
+      expect(searchMembersTool.input.shape.postalCode.description).toContain('K1A 0A6');
+      for (const description of [
+        searchMembersTool.input.shape.province.description,
+        getVoteTool.input.shape.province.description,
+      ]) {
+        expect(description).toContain('abbreviation');
+        expect(description).not.toMatch(/postal/i);
+      }
     });
   });
   it.each([{ limit: 0 }, { limit: 10_001 }, { offset: -1 }])(

@@ -2,7 +2,7 @@
 import { serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { XMLParser } from 'fast-xml-parser';
 import { parseHTML } from 'linkedom';
-import { assertRepresentableText } from '@/domain/normalization.js';
+import { decodeXmlEntities } from '@/domain/xml-entities.js';
 import type {
   Division,
   MemberVote,
@@ -35,28 +35,7 @@ function object(value: unknown, field: string): RecordValue {
   return value as RecordValue;
 }
 function decode(value: string): string {
-  if (/&(?!(?:#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);)/.test(value))
-    return malformed('XML character reference');
-  const text = value.replace(
-    /&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g,
-    (entity, token: string) => {
-      if (token.startsWith('#')) {
-        const point =
-          token[1]?.toLowerCase() === 'x'
-            ? Number.parseInt(token.slice(2), 16)
-            : Number(token.slice(1));
-        if (point < 1 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff))
-          return malformed('XML character reference');
-        return String.fromCodePoint(point);
-      }
-      return (
-        ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[token] ??
-        entity
-      );
-    },
-  );
-  assertRepresentableText(text);
-  return text;
+  return decodeXmlEntities(value, () => malformed('XML character reference'));
 }
 function text(row: RecordValue, key: string): string | null {
   const value = row[key];
@@ -301,6 +280,10 @@ export function parseMemberVotes(xml: string, personId: string, session?: string
         dateTime,
         subject: text(row, 'DecisionDivisionSubject'),
         result: text(row, 'DecisionResultName'),
+        yeas: integer(row, 'DecisionDivisionNumberOfYeas', true),
+        nays: integer(row, 'DecisionDivisionNumberOfNays', true),
+        paired: integer(row, 'DecisionDivisionNumberOfPaired', true),
+        documentType: text(row, 'DecisionDivisionDocumentTypeName'),
         billCode: billCode(row),
         ballot: recordedBallot(row),
         url: divisionUrl(current, number),

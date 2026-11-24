@@ -16,7 +16,25 @@ import {
 import { realDossier } from '../../fixtures/bill-tools/harness.js';
 
 const identity = { ParliamentNumber: 45, SessionNumber: 1, NumberCode: 'C-901' };
-const dossier = (row: JsonRecord) => parseBillDossier([row], '45-1', 'C-901');
+/** The official session index as the picker advertises it, through the production parser. */
+const picker = (...values: string[]) =>
+  parseSessions(
+    values.map((value) => `<a data-input="parlsession" data-value="${value}"></a>`).join(''),
+  );
+/** Every session the captured dossiers and their reinstatement counterparts name. */
+const officialIndex = picker(
+  '45-1',
+  '44-1',
+  '43-2',
+  '43-1',
+  '42-1',
+  '41-2',
+  '41-1',
+  '37-1',
+  '35-2',
+  '35-1',
+);
+const dossier = (row: JsonRecord) => parseBillDossier([row], '45-1', 'C-901', officialIndex);
 const invalid = expect.objectContaining({
   data: expect.objectContaining({ reason: 'upstream_response_invalid', retryable: false }),
 });
@@ -28,6 +46,7 @@ const real = (name: RealDossier) => {
     [row],
     `${row.ParliamentNumber}-${row.SessionNumber}`,
     String(row.NumberCode),
+    officialIndex,
   );
 };
 
@@ -187,7 +206,7 @@ describe('official bill records', () => {
         billCode: code,
         url: `https://www.parl.ca/legisinfo/en/bill/45-1/${code.toLowerCase()}`,
       });
-      expect(parseBillDossier([row], '45-1', code).bill.billCode).toBe(code);
+      expect(parseBillDossier([row], '45-1', code, officialIndex).bill.billCode).toBe(code);
     },
   );
   it.each(['C-15AB', 'C-15A1', 'C-15a', 'C-015', 'C 15A', 'C-A'])(
@@ -299,6 +318,7 @@ describe('official bill records', () => {
         [{ ...identity, ParliamentNumber: parliament, SponsorPersonName: '  ' }],
         `${parliament}-1`,
         'C-901',
+        officialIndex,
       );
       expect(result).toMatchObject({
         sponsor: { name: null, personId: null, riding: null },
@@ -359,7 +379,7 @@ describe('official bill records', () => {
     { rows: [{ ...identity, NumberCode: 'S-901' }] },
     { rows: [{ ...identity, SessionNumber: 2 }] },
   ])('requires the exact dossier identity: $rows', ({ rows }) => {
-    expect(() => parseBillDossier(rows, '45-1', 'C-901')).toThrow(
+    expect(() => parseBillDossier(rows, '45-1', 'C-901', officialIndex)).toThrow(
       expect.objectContaining({
         data: expect.objectContaining({ reason: 'bill_not_found', retryable: false }),
       }),
@@ -370,7 +390,7 @@ describe('official bill records', () => {
       [identity, identity],
       [identity, { ...identity, NumberCode: 'S-901' }],
     ]) {
-      expect(() => parseBillDossier(rows, '45-1', 'C-901')).toThrow(
+      expect(() => parseBillDossier(rows, '45-1', 'C-901', officialIndex)).toThrow(
         expect.objectContaining({
           data: expect.objectContaining({ reason: 'upstream_response_invalid', retryable: false }),
         }),
@@ -797,6 +817,345 @@ describe('dossier summary, notes, web references, and reading milestones', () =>
     { PassedSenateThirdReadingDateTime: 20260326 },
   ])('rejects a malformed new dossier field %j', (fields) => {
     expect(() => dossier({ ...identity, ...fields })).toThrow(invalid);
+  });
+});
+
+describe('dossier similar bills, reinstatement, and inter-chamber messages', () => {
+  const lineage = (rows: readonly { session: string; billCode: string }[] | null) =>
+    rows?.map(({ session, billCode }) => `${session} ${billCode}`) ?? null;
+  it('orders the six similar bills of 41-2 C-201 newest session first and links its predecessor', () => {
+    const result = real('41-2-c-201');
+    expect(lineage(result.similarBills)).toEqual([
+      '41-1 C-201',
+      '40-3 C-227',
+      '40-2 C-227',
+      '40-1 C-227',
+      '39-2 C-390',
+      '39-1 C-390',
+    ]);
+    expect(result.similarBills?.map(({ url }) => url)).toEqual([
+      'https://www.parl.ca/legisinfo/en/bill/41-1/c-201',
+      'https://www.parl.ca/legisinfo/en/bill/40-3/c-227',
+      'https://www.parl.ca/legisinfo/en/bill/40-2/c-227',
+      'https://www.parl.ca/legisinfo/en/bill/40-1/c-227',
+      'https://www.parl.ca/legisinfo/en/bill/39-2/c-390',
+      'https://www.parl.ca/legisinfo/en/bill/39-1/c-390',
+    ]);
+    expect(result.similarBills?.[0]).toEqual({
+      session: '41-1',
+      billCode: 'C-201',
+      longTitle: {
+        en: 'An Act to amend the Income Tax Act (travel and accommodation deduction for tradespersons)',
+        fr: 'Loi modifiant la Loi de l’impôt sur le revenu (déduction des frais de déplacement et de logement pour les gens de métier)',
+      },
+      shortTitle: { en: null, fr: null },
+      billType: 'Private Member’s Bill',
+      originatingChamber: 'House',
+      status: 'At second reading in the House of Commons',
+      latestMajorStage: { name: 'First reading', chamber: 'House' },
+      royalAssentDate: null,
+      url: 'https://www.parl.ca/legisinfo/en/bill/41-1/c-201',
+    });
+    expect(result.reinstatement).toEqual({
+      from: { session: '41-1', billCode: 'C-201' },
+      as: null,
+    });
+    expect(result.interChamberMessages).toEqual([]);
+  });
+  it('links 41-1 C-201 forward to its 41-2 successor, which its similar bills omit', () => {
+    const result = real('41-1-c-201');
+    expect(result.reinstatement).toEqual({
+      from: null,
+      as: { session: '41-2', billCode: 'C-201' },
+    });
+    expect(lineage(result.similarBills)).toEqual([
+      '40-3 C-227',
+      '40-2 C-227',
+      '40-1 C-227',
+      '39-2 C-390',
+      '39-1 C-390',
+    ]);
+  });
+  it('links 43-2 C-218 back to 43-1 and reads each similar bill as its own summary', () => {
+    const result = real('43-2-c-218');
+    expect(result.reinstatement).toEqual({
+      from: { session: '43-1', billCode: 'C-218' },
+      as: null,
+    });
+    expect(
+      result.similarBills?.map(({ session, billCode, shortTitle, status, latestMajorStage }) => ({
+        bill: `${session} ${billCode}`,
+        shortTitle: shortTitle.en,
+        status,
+        latestMajorStage,
+      })),
+    ).toEqual([
+      {
+        bill: '43-1 C-218',
+        shortTitle: 'Safe and Regulated Sports Betting Act',
+        status: 'At second reading in the House of Commons',
+        latestMajorStage: { name: 'First reading', chamber: 'House' },
+      },
+      {
+        bill: '42-1 C-221',
+        shortTitle: 'Safe and Regulated Sports Betting Act',
+        status: 'Bill defeated',
+        latestMajorStage: { name: 'First reading', chamber: 'House' },
+      },
+      {
+        bill: '41-2 C-290',
+        shortTitle: null,
+        status: 'At consideration in committee in the Senate',
+        latestMajorStage: { name: 'Second reading', chamber: 'Senate' },
+      },
+      {
+        bill: '40-3 C-627',
+        shortTitle: null,
+        status: 'Outside the Order of Precedence',
+        latestMajorStage: { name: 'First reading', chamber: 'House' },
+      },
+    ]);
+  });
+  it('reads the six 45-1 C-9 messages in source order with their clocks as published', () => {
+    const result = real('45-1-c-9');
+    expect(result.interChamberMessages).toHaveLength(6);
+    expect(result.interChamberMessages?.[0]).toEqual({
+      name: {
+        en: 'Message sent to the House of Commons',
+        fr: 'Message envoyé à la Chambre des communes',
+      },
+      dateTime: '2026-06-04T22:30:00',
+      chamber: 'Senate',
+      sittingNumber: '79',
+    });
+    expect(result.interChamberMessages?.[5]).toEqual({
+      name: {
+        en: 'Concurrence in the motion respecting Senate amendments',
+        fr: 'Adoption de la motion relative aux amendements du Sénat',
+      },
+      dateTime: '2026-06-17T15:30:00',
+      chamber: 'House',
+      sittingNumber: '138',
+    });
+    expect(
+      result.interChamberMessages?.map(({ dateTime, chamber, sittingNumber }) => [
+        dateTime,
+        chamber,
+        sittingNumber,
+      ]),
+    ).toEqual([
+      ['2026-06-04T22:30:00', 'Senate', '79'],
+      ['2026-06-11T21:08:49.91', 'House', '134'],
+      ['2026-06-15T22:30:47.477', 'House', '136'],
+      ['2026-06-16T16:55:29.607', 'House', '137'],
+      ['2026-06-17T15:15:00', 'House', '138'],
+      ['2026-06-17T15:30:00', 'House', '138'],
+    ]);
+    expect(result.similarBills).toBeNull();
+    expect(result.reinstatement).toEqual({ from: null, as: null });
+  });
+  it('lists the same-session split parent of 37-1 C-15A and its twelve messages across both chambers', () => {
+    const result = real('37-1-c-15a');
+    expect(lineage(result.similarBills)).toEqual(['37-1 C-15']);
+    expect(result.similarBills?.[0]).toMatchObject({
+      billType: 'House Government Bill',
+      shortTitle: { en: 'Criminal Law Amendment Act, 2001' },
+      latestMajorStage: { name: 'Second reading', chamber: 'House' },
+    });
+    expect(
+      result.interChamberMessages?.map(
+        ({ chamber, sittingNumber }) => `${chamber} ${sittingNumber}`,
+      ),
+    ).toEqual([
+      'Senate 98',
+      'House 171',
+      'House 173',
+      'House 174',
+      'House 174',
+      'House 174',
+      'Senate 108',
+      'Senate 109',
+      'Senate 110',
+      'Senate 112',
+      'Senate 113',
+      'Senate 115',
+    ]);
+  });
+  it('keeps 43-2 S-230 messages empty and 35-2 C-2 messages unavailable', () => {
+    expect(real('43-2-s-230')).toMatchObject({ interChamberMessages: [], similarBills: null });
+    expect(real('35-2-c-2')).toMatchObject({
+      interChamberMessages: null,
+      similarBills: null,
+      reinstatement: { from: null, as: null },
+    });
+  });
+  it.each([
+    ['absent', {}, null],
+    ['null', { SimilarBills: null }, null],
+    ['empty', { SimilarBills: [] }, []],
+  ])('keeps %s similar bills as the source sends them', (_case, fields, expected) => {
+    expect(dossier({ ...identity, ...fields }).similarBills).toEqual(expected);
+  });
+  it('sorts similar bills by numeric parliament and session, then chamber prefix, number, and suffix', () => {
+    const similar = (parliament: number, session: number, code: string) => ({
+      ParliamentNumber: parliament,
+      SessionNumber: session,
+      NumberCode: code,
+    });
+    const result = dossier({
+      ...identity,
+      SimilarBills: [
+        similar(9, 1, 'C-3'),
+        similar(44, 1, 'S-245'),
+        similar(43, 2, 'S-230'),
+        similar(44, 1, 'C-71'),
+        similar(44, 10, 'C-2'),
+        similar(44, 1, 'C-15A'),
+        similar(44, 1, 'C-7'),
+        similar(44, 2, 'C-1'),
+        similar(44, 1, 'C-15'),
+        similar(10, 1, 'C-3'),
+      ],
+    });
+    expect(lineage(result.similarBills)).toEqual([
+      '44-10 C-2',
+      '44-2 C-1',
+      '44-1 C-7',
+      '44-1 C-15',
+      '44-1 C-15A',
+      '44-1 C-71',
+      '44-1 S-245',
+      '43-2 S-230',
+      '10-1 C-3',
+      '9-1 C-3',
+    ]);
+  });
+  const link = (fields: JsonRecord, session = '45-2', index = picker('45-3', '45-2', '45-1')) =>
+    parseBillDossier(
+      [
+        {
+          ...identity,
+          ParliamentNumber: 45,
+          SessionNumber: Number(session.split('-')[1]),
+          ...fields,
+        },
+      ],
+      session,
+      'C-901',
+      index,
+    ).reinstatement;
+  it.each([
+    [
+      'a flagged predecessor in the previous session',
+      { DidReinstateFromPreviousSession: true, ReinstatedFromBillNumberCode: 'C-5' },
+      { from: { session: '45-1', billCode: 'C-5' }, as: null },
+    ],
+    [
+      'a flagged successor in the next session',
+      { DidReinstateInNextSession: true, ReinstatedAsBillNumberCode: 'S-12A' },
+      { from: null, as: { session: '45-3', billCode: 'S-12A' } },
+    ],
+    [
+      'both directions at once',
+      {
+        DidReinstateFromPreviousSession: true,
+        ReinstatedFromBillNumberCode: 'C-5',
+        DidReinstateInNextSession: true,
+        ReinstatedAsBillNumberCode: 'C-6',
+      },
+      { from: { session: '45-1', billCode: 'C-5' }, as: { session: '45-3', billCode: 'C-6' } },
+    ],
+    [
+      'a flag without a published code',
+      { DidReinstateFromPreviousSession: true, ReinstatedFromBillNumberCode: '  ' },
+      { from: { session: '45-1', billCode: null }, as: null },
+    ],
+    [
+      'a code without a flag',
+      { ReinstatedAsBillNumberCode: 'C-6' },
+      { from: null, as: { session: '45-3', billCode: 'C-6' } },
+    ],
+    [
+      'false flags and no codes',
+      { DidReinstateFromPreviousSession: false, DidReinstateInNextSession: false },
+      { from: null, as: null },
+    ],
+    ['no reinstatement fields', {}, { from: null, as: null }],
+  ])('reads %s against the official session index', (_case, fields, expected) => {
+    expect(link(fields)).toEqual(expected);
+  });
+  it.each([
+    ['a next session the index does not list', '45-2', picker('45-2', '45-1'), 'as', null],
+    ['a previous session before the first', '45-1', picker('45-2', '45-1', '44-2'), 'from', null],
+    ['a previous session across a gap in the index', '45-3', picker('45-3', '45-1'), 'from', null],
+    [
+      'an adjacent session in another Parliament',
+      '45-1',
+      picker('46-1', '45-1', '44-2'),
+      'from',
+      null,
+    ],
+    ['a listed previous session', '45-3', picker('45-3', '45-2'), 'from', '45-2'],
+  ])(
+    'resolves %s to its session or null, never a guess',
+    (_case, session, index, side, expected) => {
+      const fields =
+        side === 'from'
+          ? { DidReinstateFromPreviousSession: true, ReinstatedFromBillNumberCode: 'C-5' }
+          : { DidReinstateInNextSession: true, ReinstatedAsBillNumberCode: 'C-5' };
+      expect(link(fields, session, index)[side as 'from' | 'as']).toEqual({
+        session: expected,
+        billCode: 'C-5',
+      });
+    },
+  );
+  it.each([
+    ['a non-array similar bills value', { SimilarBills: {} }],
+    ['a similar bill without its identity', { SimilarBills: [{ NumberCode: 'C-5' }] }],
+    ['a malformed similar bill code', { SimilarBills: [{ ...identity, NumberCode: 'bad' }] }],
+    [
+      'contradictory similar-bill chamber evidence',
+      { SimilarBills: [{ ...identity, IsHouseBill: true, IsSenateBill: true }] },
+    ],
+    ['a non-array message list', { BillStages: { InterChamberMessages: {} } }],
+    [
+      'a message chamber ID of 3',
+      { BillStages: { InterChamberMessages: [{ ChamberOrganizationId: 3 }] } },
+    ],
+    [
+      'a message chamber ID of 0',
+      { BillStages: { InterChamberMessages: [{ ChamberOrganizationId: 0 }] } },
+    ],
+    [
+      'a string message chamber ID',
+      { BillStages: { InterChamberMessages: [{ ChamberOrganizationId: '1' }] } },
+    ],
+    [
+      'a message chamber name contradicting its ID',
+      {
+        BillStages: {
+          InterChamberMessages: [{ ChamberNameEn: 'Senate', ChamberOrganizationId: 1 }],
+        },
+      },
+    ],
+    ['a non-text message date', { BillStages: { InterChamberMessages: [{ Date: 20260604 }] } }],
+    ['an object sitting number', { BillStages: { InterChamberMessages: [{ MeetingNumber: {} }] } }],
+    ['a malformed reinstatement code', { ReinstatedFromBillNumberCode: 'C 5' }],
+    ['a non-boolean reinstatement flag', { DidReinstateInNextSession: 'true' }],
+    [
+      'a code its flag denies',
+      { DidReinstateFromPreviousSession: false, ReinstatedFromBillNumberCode: 'C-5' },
+    ],
+  ])('rejects %s as an invalid upstream response', (_case, fields) => {
+    expect(() => dossier({ ...identity, ...fields })).toThrow(invalid);
+  });
+  it('keeps an absent message chamber and sitting null', () => {
+    expect(
+      dossier({ ...identity, BillStages: { InterChamberMessages: [{ EventNameEn: 'Message' }] } })
+        .interChamberMessages,
+    ).toEqual([
+      { name: { en: 'Message', fr: null }, dateTime: null, chamber: null, sittingNumber: null },
+    ]);
   });
 });
 

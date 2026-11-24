@@ -35,8 +35,8 @@ import {
   type Membership,
   type Speech,
 } from '@/services/openparliament/index.js';
-import { formatResult, measuredTrailer, RESPONSE_BUDGET, responseBytes } from './_format.js';
-import { resolvePolitician } from './_member-identity.js';
+import { formatResult, measuredTrailer } from './_format.js';
+import { formerMemberNotice, formerMemberRecovery, resolvePolitician } from './_member-identity.js';
 
 const BillScopeSchema = z
   .object({
@@ -143,24 +143,9 @@ const enrichment = {
     .string()
     .optional()
     .describe(
-      'Limit clamp, coverage, continuation, procedural-filter, candidates without selected-language text, unavailable affiliation, and response-budget guidance.',
+      'Former-MP personId disclosure, limit clamp, coverage, continuation, procedural-filter, candidates without selected-language text, and unavailable affiliation guidance.',
     ),
 };
-/** Where a page ends: returned speeches, scan position, and the retrievals made before it. */
-interface PageEnd {
-  /** Response-budget stop after fitting speeches, or one speech exceeding the budget alone. */
-  budget?: 'stopped' | 'exceeded';
-  count: number;
-  excluded: number;
-  exhausted: boolean;
-  nextOffset: number | null;
-  scanned: number;
-  /** Scope and candidate-page provenance entries; returned memberships follow them. */
-  sources: number;
-  /** Scanned House candidates with no selected-language text, which contains could not match. */
-  textless: number;
-}
-
 /** Find indexed House speeches without treating a bounded negative scan as absence. */
 export const searchSpeechesTool = tool('canparl_search_speeches', {
   description:
@@ -168,7 +153,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     politician: OptionalStringSchema.describe(
-      "Speaker OpenParliament slug or exact politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId.",
+      "Speaker OpenParliament slug or exact politician path/HTTPS URL (member.slug from canparl_get_member, or an includeFormer canparl_search_members row), or a current MP's official personId. A digit-only value equal to a current personId, or its /politicians/<digits>/ path or profile URL, is read as that personId. Any other digit-only value is an OpenParliament ID; a notice names the former MP whose personId it also is.",
     ),
     billDebated: BillScopeSchema.optional().describe(
       'Bill debated; combined with all other scopes using AND.',
@@ -201,7 +186,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       .max(COUNT_CEILING)
       .default(5)
       .describe(
-        'Maximum returned matches, 1–10 per call; larger values up to 10000 clamp to 10 with a notice. A page ends early at the 24000-byte response budget, returning at least one match whole. Candidate pages contain 20 rows.',
+        'Maximum returned matches, 1–10 per call; larger values up to 10000 clamp to 10 with a notice. Candidate pages contain 20 rows.',
       ),
     offset: OffsetSchema.describe(
       'Raw candidate offset; keep every filter identical when continuing.',
@@ -217,9 +202,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       .number()
       .int()
       .nonnegative()
-      .describe(
-        'Raw candidates visited, including excluded committee records; at most 100. A response-budget stop ends it before the first match not returned.',
-      ),
+      .describe('Raw candidates visited, including excluded committee records; at most 100.'),
     exhausted: z
       .boolean()
       .describe('True only after visiting every row of a source-terminal page.'),
@@ -228,9 +211,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       .int()
       .nonnegative()
       .nullable()
-      .describe(
-        'First unvisited raw candidate offset, or null when exhausted; after a response-budget stop, the first match not returned.',
-      ),
+      .describe('First unvisited raw candidate offset, or null when exhausted.'),
     provenance: z
       .array(SourceSchema)
       .describe(
@@ -243,6 +224,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
     {
       reason: 'speech_scope_required',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'No speaker, bill, or date bound is supplied.',
       recovery:
         "Retry canparl_search_speeches with a politician (member.slug from canparl_get_member, a slug from an includeFormer canparl_search_members row, or a current MP's personId), a bill from canparl_search_bills, or a date bound.",
@@ -251,6 +233,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
     {
       reason: 'invalid_speech_filter',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'A malformed slug, a bill session with a zero or out-of-range number, a date naming no calendar day, reversed date bounds, or dateTo 9999-12-31.',
       recovery:
         "Retry canparl_search_speeches in the shape the error names: a politician slug (member.slug from canparl_get_member or an includeFormer canparl_search_members row) or a current MP's personId, a bill session and code from canparl_search_bills, and YYYY-MM-DD dates with dateFrom no later than dateTo.",
@@ -259,6 +242,7 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
     {
       reason: 'speech_entity_not_found',
       code: JsonRpcErrorCode.NotFound,
+      severity: 'notice',
       when: 'A supplied speaker or bill is absent from OpenParliament, or a current personId has no unique verified profile.',
       recovery:
         'Call canparl_search_members with includeFormer true or canparl_search_bills to verify the identifier; OpenParliament may not yet index the official record.',
@@ -319,9 +303,17 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
       const service = getOpenParliamentService();
       const provenance: Source[] = [];
       let politicianName: string | null = null;
+      let identityNotice: string | null = null;
       if (politician) {
-        const profile = await resolvePolitician(politician, request, provenance);
-        if (!profile) throw ctx.fail('speech_entity_not_found');
+        const { profile, formerMember } = await resolvePolitician(politician, request, provenance);
+        if (!profile)
+          throw ctx.fail(
+            'speech_entity_not_found',
+            undefined,
+            formerMember ? formerMemberRecovery('politician') : undefined,
+          );
+        if (formerMember)
+          identityNotice = formerMemberNotice(politician, profile, formerMember, 'politician');
         politician = profile.slug;
         politicianName = profile.name;
       }
@@ -416,93 +408,12 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
         language,
         offset: input.offset,
       };
-      const accepted: ReturnType<typeof attribute>[] = [];
-      /** The response a page ending at `end` returns. */
-      const respond = (end: PageEnd) => {
-        const speeches = accepted.slice(0, end.count);
-        const notices = [
-          ...(limit.notice ? [limit.notice] : []),
-          input.substantiveOnly
-            ? 'substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.'
-            : 'substantiveOnly=false includes procedural and substantive remarks.',
-        ];
-        if (end.excluded)
-          notices.push(
-            'Non-House or committee candidates were excluded and are included in scanned and excludedCommittees.',
-          );
-        if (end.textless)
-          notices.push(
-            `${end.textless} scanned ${end.textless === 1 ? 'candidate' : 'candidates'} had no ${LANGUAGE_NAMES[language]} text and could not match contains.`,
-          );
-        if (speeches.some((speech) => speech.party === null || speech.riding === null))
-          notices.push(
-            'Historical party or riding is unavailable for some returned speeches; nulls never substitute current affiliation.',
-          );
-        const unavailable = new Set(
-          speeches.flatMap((speech) => {
-            const reason = speech.membershipUrl
-              ? memberships.get(speech.membershipUrl)?.unavailable
-              : undefined;
-            return reason ? [reason] : [];
-          }),
-        );
-        if (unavailable.size)
-          notices.push(
-            `Optional historical membership enrichment was unavailable (${[...unavailable].join(', ')}).`,
-          );
-        if (!speeches.length)
-          notices.push(
-            !end.exhausted
-              ? 'No text matches among the scanned candidates; call canparl_search_speeches with nextOffset and identical filters to continue.'
-              : input.offset > 0 && end.scanned === 0
-                ? 'This offset is past the last indexed candidate; retry canparl_search_speeches with offset 0 and identical filters.'
-                : 'No indexed speeches matched; broaden dates or remove contains and retry canparl_search_speeches. This does not establish that no parliamentary speech occurred.',
-          );
-        const resume =
-          'call canparl_search_speeches with nextOffset and identical filters to continue.';
-        if (end.budget === 'exceeded')
-          notices.push(
-            `The response exceeds the ${RESPONSE_BUDGET}-byte budget with one speech, returned whole${end.exhausted ? '.' : `; ${resume}`}`,
-          );
-        else if (end.budget === 'stopped')
-          notices.push(
-            `The ${RESPONSE_BUDGET}-byte response budget ended this page after ${speeches.length} ${speeches.length === 1 ? 'speech' : 'speeches'}; ${resume}`,
-          );
-        const hydrated = new Set(speeches.flatMap(({ membershipUrl }) => membershipUrl ?? []));
-        const result = {
-          speeches,
-          scanned: end.scanned,
-          exhausted: end.exhausted,
-          nextOffset: end.nextOffset,
-          provenance: [
-            ...provenance.slice(0, end.sources),
-            ...[...hydrated].flatMap((url) => memberships.get(url)?.sources ?? []),
-          ],
-        };
-        const enriched = {
-          appliedFilters,
-          shown: speeches.length,
-          cap: limit.value,
-          truncated: !end.exhausted,
-          excludedCommittees: end.excluded,
-          notice: notices.join(' '),
-        };
-        return { result, enriched };
-      };
-      const bytes = (end: PageEnd) => {
-        const { result, enriched } = respond(end);
-        return responseBytes(result, enriched);
-      };
+      const accepted: Selected[] = [];
       let scanned = 0;
       let excluded = 0;
       let textless = 0;
       let exhausted = false;
       let nextOffset: number | null = input.offset;
-      let end: PageEnd | undefined;
-      /** The page ending right after the last accepted speech, measured to fit the budget. */
-      let afterLast: PageEnd | undefined;
-      /** Accepted source speeches with the page ends just before and just after each one. */
-      const found: { speech: Selected; before: PageEnd; after: PageEnd }[] = [];
       scan: for (let pageNumber = 0; pageNumber < 5 && nextOffset !== null; pageNumber++) {
         request.throwIfAborted();
         const pageOffset: number = nextOffset;
@@ -539,93 +450,88 @@ export const searchSpeechesTool = tool('canparl_search_speeches', {
             scanned++;
             continue;
           }
-          // Selection precedes the text test and every budget measure, so both see the returned record.
+          // Selection precedes the text test, so contains reads the returned language.
           const selected = select(speech);
           if (input.contains && !includesText(selected.content, input.contains)) {
             if (selected.content === null) textless++;
             scanned++;
             continue;
           }
-          const before: PageEnd = {
-            count: accepted.length,
-            scanned,
-            excluded,
-            textless,
-            sources: provenance.length,
-            exhausted: false,
-            nextOffset: pageOffset + index,
-            budget: 'stopped',
-          };
-          accepted.push(attribute(selected, null));
+          accepted.push(selected);
           scanned++;
-          const last = index === page.objects.length - 1;
-          const after: PageEnd = {
-            count: accepted.length,
-            scanned,
-            excluded,
-            textless,
-            sources: provenance.length,
-            exhausted: last && page.nextOffset === null,
-            nextOffset: last ? page.nextOffset : pageOffset + index + 1,
-          };
-          found.push({ speech: selected, before, after });
-          const stopped: PageEnd = { ...after, budget: 'stopped' };
-          if (bytes(stopped) > RESPONSE_BUDGET) {
-            // Only a first speech may exceed alone; a later one is left for the next call.
-            end = !afterLast
-              ? { ...after, budget: 'exceeded' }
-              : bytes(before) <= RESPONSE_BUDGET
-                ? before
-                : afterLast;
-            break scan;
-          }
-          afterLast = stopped;
           if (accepted.length === limit.value) {
-            end = after;
+            // A full page ends the scan; continuation resumes at the first unvisited candidate.
+            const last = index === page.objects.length - 1;
+            exhausted = last && page.nextOffset === null;
+            nextOffset = last ? page.nextOffset : pageOffset + index + 1;
             break scan;
           }
         }
         exhausted = page.nextOffset === null;
         nextOffset = page.nextOffset;
       }
-      end ??= {
-        count: accepted.length,
-        scanned,
-        excluded,
-        textless,
-        sources: provenance.length,
-        exhausted,
-        nextOffset,
-      };
-      // Candidates scanned after the last accepted speech can still outgrow the budget.
-      if (!end.budget && afterLast && bytes(end) > RESPONSE_BUDGET) end = afterLast;
-      // Memberships hydrate after the scan, so a slow optional lookup never spends the upstream
-      // budget required candidate pages need. Affiliation text can outgrow the scan's measure; the
-      // first speech that no longer fits is the one rejected, and the page ends before it.
-      for (const [index, { speech, before, after }] of found.slice(0, end.count).entries()) {
+      // Memberships hydrate after the scan, and only for returned speeches, so a slow optional
+      // lookup never spends the upstream time budget required candidate pages need.
+      const speeches: ReturnType<typeof attribute>[] = [];
+      for (const speech of accepted) {
         request.throwIfOuterAborted();
         const hydration = speech.membershipUrl ? await hydrate(speech.membershipUrl) : null;
-        accepted[index] = attribute(speech, hydration?.membership ?? null);
-        if (end.budget === 'exceeded') continue;
-        const stopped: PageEnd = { ...after, budget: 'stopped' };
-        const final = index === end.count - 1;
-        if (bytes(final ? end : stopped) <= RESPONSE_BUDGET) continue;
-        if (final && bytes(stopped) <= RESPONSE_BUDGET) {
-          end = stopped;
-          continue;
-        }
-        const previous = found[index - 1];
-        end = !previous
-          ? { ...after, budget: 'exceeded' }
-          : bytes(before) <= RESPONSE_BUDGET
-            ? before
-            : { ...previous.after, budget: 'stopped' };
-        break;
+        speeches.push(attribute(speech, hydration?.membership ?? null));
       }
-      const { result, enriched } = respond(end);
-      ctx.enrich(enriched);
+      const notices = [
+        ...(identityNotice ? [identityNotice] : []),
+        ...(limit.notice ? [limit.notice] : []),
+        input.substantiveOnly
+          ? 'substantiveOnly=true excludes procedural remarks; set substantiveOnly=false to include them.'
+          : 'substantiveOnly=false includes procedural and substantive remarks.',
+      ];
+      if (excluded)
+        notices.push(
+          'Non-House or committee candidates were excluded and are included in scanned and excludedCommittees.',
+        );
+      if (textless)
+        notices.push(
+          `${textless} scanned ${textless === 1 ? 'candidate' : 'candidates'} had no ${LANGUAGE_NAMES[language]} text and could not match contains.`,
+        );
+      if (speeches.some((speech) => speech.party === null || speech.riding === null))
+        notices.push(
+          'Historical party or riding is unavailable for some returned speeches; nulls never substitute current affiliation.',
+        );
+      const hydrated = new Set(speeches.flatMap(({ membershipUrl }) => membershipUrl ?? []));
+      const unavailable = new Set(
+        [...hydrated].flatMap((url) => memberships.get(url)?.unavailable ?? []),
+      );
+      if (unavailable.size)
+        notices.push(
+          `Optional historical membership enrichment was unavailable (${[...unavailable].join(', ')}).`,
+        );
+      if (!speeches.length)
+        notices.push(
+          !exhausted
+            ? 'No text matches among the scanned candidates; call canparl_search_speeches with nextOffset and identical filters to continue.'
+            : input.offset > 0 && scanned === 0
+              ? 'This offset is past the last indexed candidate; retry canparl_search_speeches with offset 0 and identical filters.'
+              : 'No indexed speeches matched; broaden dates or remove contains and retry canparl_search_speeches. This does not establish that no parliamentary speech occurred.',
+        );
+      ctx.enrich({
+        appliedFilters,
+        shown: speeches.length,
+        cap: limit.value,
+        truncated: !exhausted,
+        excludedCommittees: excluded,
+        notice: notices.join(' '),
+      });
       request.throwIfOuterAborted();
-      return result;
+      return {
+        speeches,
+        scanned,
+        exhausted,
+        nextOffset,
+        provenance: [
+          ...provenance,
+          ...[...hydrated].flatMap((url) => memberships.get(url)?.sources ?? []),
+        ],
+      };
     } finally {
       request.dispose();
     }

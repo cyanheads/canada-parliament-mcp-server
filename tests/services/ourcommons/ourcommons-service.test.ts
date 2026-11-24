@@ -7,6 +7,7 @@ import { OurCommonsService } from '@/services/ourcommons/ourcommons-service.js';
 import {
   parliamentRosterUrl,
   realMemberVotes,
+  realPostalLookup,
   realRoster,
   rosterPicker,
 } from '../../fixtures/member-tools/harness.js';
@@ -390,6 +391,166 @@ describe('OurCommonsService network boundary', () => {
           data: { reason: 'upstream_blocked', source: 'ourcommons', status: 403, retryable: false },
         });
         expect(urls()).toEqual(requested);
+      },
+    );
+  });
+  describe('postal-code lookup', () => {
+    const lookup = (code: string) => `${base}/search/xml?q=${code}`;
+    const urls = () => http.calls.map((call) => call.request.url);
+    it('reads the current members a complete code names, cached five minutes under its URL', async () => {
+      http.route({
+        match: lookup('K1A0A6'),
+        respond: () => new Response(realPostalLookup('k1a0a6')),
+      });
+      const first = await settle(service.listPostalCodeMembers('K1A0A6', budget));
+      expect(first.data).toEqual([
+        expect.objectContaining({ personId: '110572', riding: 'Ottawa Centre', to: null }),
+      ]);
+      expect(first.provenance).toEqual([
+        {
+          source: 'ourcommons',
+          url: lookup('K1A0A6'),
+          retrievedAt: expect.any(String),
+          cached: false,
+        },
+      ]);
+      const second = await service.listPostalCodeMembers('K1A0A6', budget);
+      expect(second.data).toEqual(first.data);
+      expect(second.provenance[0]).toMatchObject({
+        cached: true,
+        retrievedAt: first.provenance[0]?.retrievedAt,
+      });
+      budget.dispose();
+      await vi.advanceTimersByTimeAsync(300_001);
+      budget = createRequestContext(createMockContext());
+      const expired = await settle(service.listPostalCodeMembers('K1A0A6', budget));
+      expect(expired.provenance[0]?.cached).toBe(false);
+      expect(urls()).toEqual([lookup('K1A0A6'), lookup('K1A0A6')]);
+      expect(http.calls[0]?.request.headers.get('accept')).toBe('application/xml');
+      expect(http.calls[0]?.request.redirect).toBe('manual');
+    });
+    it('returns every sitting member of a code that spans ridings', async () => {
+      http.route({
+        match: lookup('K0A1L0'),
+        respond: () => new Response(realPostalLookup('k0a1l0')),
+      });
+      const result = await settle(service.listPostalCodeMembers('K0A1L0', budget));
+      expect(result.data.map(({ personId, riding }) => [personId, riding])).toEqual([
+        ['122850', 'Carleton'],
+        ['110459', 'Kanata'],
+      ]);
+    });
+    it('answers a code no sitting member represents with no rows, from one request, and caches it', async () => {
+      http.route({
+        match: lookup('Z9Z9Z9'),
+        respond: () => new Response(realPostalLookup('z9z9z9')),
+      });
+      expect((await settle(service.listPostalCodeMembers('Z9Z9Z9', budget))).data).toEqual([]);
+      const again = await service.listPostalCodeMembers('Z9Z9Z9', budget);
+      expect(again).toMatchObject({ data: [], provenance: [{ cached: true }] });
+      expect(urls()).toEqual([lookup('Z9Z9Z9')]);
+    });
+    it.each([
+      'K1A 0A6',
+      'k1a0a6',
+      'K1A',
+      'K1A0A',
+      'K1A0A67',
+      '1A1A1A',
+      '',
+      'K1A0A6&p=*',
+      'K1A0A6/../votes',
+    ])('rejects non-canonical code %j before any HTTP', async (code) => {
+      await expect(service.listPostalCodeMembers(code, budget)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+      });
+      expect(http.calls).toHaveLength(0);
+    });
+    it('fails a 403 as upstream_blocked without retry, a cached failure, or the unfiltered roster', async () => {
+      http.route(
+        {
+          match: lookup('K1A0A6'),
+          once: true,
+          respond: new Response('<html>refusal</html>', { status: 403 }),
+        },
+        { match: lookup('K1A0A6'), respond: () => new Response(realPostalLookup('k1a0a6')) },
+      );
+      await expect(settle(service.listPostalCodeMembers('K1A0A6', budget))).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'upstream_blocked', source: 'ourcommons', status: 403, retryable: false },
+      });
+      expect(urls()).toEqual([lookup('K1A0A6')]);
+      const retried = await settle(service.listPostalCodeMembers('K1A0A6', budget));
+      expect(retried.provenance[0]?.cached).toBe(false);
+      expect(urls()).toEqual([lookup('K1A0A6'), lookup('K1A0A6')]);
+    });
+    it.each([
+      [
+        'an exhausted 5xx',
+        () => new Response('', { status: 503 }),
+        { code: JsonRpcErrorCode.ServiceUnavailable, data: { status: 503 } },
+        [3, 3],
+      ],
+      [
+        'an exhausted 429',
+        () => new Response('', { status: 429 }),
+        { code: JsonRpcErrorCode.RateLimited, data: { status: 429 } },
+        [3, 3],
+      ],
+      [
+        'a bot-check HTML page served with 200 on every attempt',
+        () =>
+          new Response(
+            '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body></body></html>',
+          ),
+        {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          message: 'House source returned HTML instead of XML. (failed after 3 attempts)',
+        },
+        [3, 3],
+      ],
+      [
+        'a 404',
+        () => new Response('', { status: 404 }),
+        { code: JsonRpcErrorCode.NotFound, data: { status: 404 } },
+        [1, 1],
+      ],
+      [
+        'a malformed body',
+        () => new Response('<ArrayOfMemberOfParliament><MemberOfParliament/>'),
+        {
+          code: JsonRpcErrorCode.SerializationError,
+          data: { reason: 'upstream_response_invalid', retryable: false },
+        },
+        [1, 1],
+      ],
+      [
+        'a stalled body',
+        (request: Request) =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                request.signal.addEventListener(
+                  'abort',
+                  () => controller.error(request.signal.reason),
+                  { once: true },
+                );
+              },
+            }),
+          ),
+        { code: JsonRpcErrorCode.Timeout },
+        [1, 3],
+      ],
+    ] as const)(
+      'fails %s with its baseline code and only lookup requests',
+      async (_name, respond, error, [fewest, most]) => {
+        http.route({ match: lookup('K1A0A6'), respond });
+        await expect(settle(service.listPostalCodeMembers('K1A0A6', budget))).rejects.toMatchObject(
+          error,
+        );
+        expect(new Set(urls())).toEqual(new Set([lookup('K1A0A6')]));
+        expect(urls().length).toBeGreaterThanOrEqual(fewest);
+        expect(urls().length).toBeLessThanOrEqual(most);
       },
     );
   });

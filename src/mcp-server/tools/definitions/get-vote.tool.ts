@@ -30,7 +30,7 @@ import {
 } from '@/domain/schemas.js';
 import { getLegisinfoService } from '@/services/legisinfo/index.js';
 import { getOurCommonsService } from '@/services/ourcommons/index.js';
-import { formatResult, measuredTrailer, RESPONSE_BUDGET, responseBytes } from './_format.js';
+import { formatResult, measuredTrailer } from './_format.js';
 import { DivisionSchema } from './search-votes.tool.js';
 
 const PartyTallySchema = z
@@ -64,13 +64,11 @@ const enrichment = {
   totalCount: z.number().int().nonnegative().describe('Matching ballot count before pagination.'),
   shown: z.number().int().nonnegative().describe('Returned ballot count.'),
   cap: z.number().int().positive().describe('Effective ballot page limit after the per-call cap.'),
-  truncated: z
-    .boolean()
-    .describe('Whether more matching ballots remain, including after a response-budget stop.'),
+  truncated: z.boolean().describe('Whether more matching ballots remain.'),
   notice: z
     .string()
     .optional()
-    .describe('Limit clamp, nonvoter, mismatch, empty, past-end, or response-budget guidance.'),
+    .describe('Limit clamp, nonvoter, mismatch, empty, or past-end guidance.'),
 };
 /** Read one division with unfiltered tallies and a filtered ballot page. */
 export const getVoteTool = tool('canparl_get_vote', {
@@ -88,7 +86,7 @@ export const getVoteTool = tool('canparl_get_vote', {
       'Canonical official caucus or certain Bloc/Green alias; historical observed caucuses are accepted.',
     ),
     province: OptionalStringSchema.describe(
-      'English province/territory name or one of the 13 postal codes.',
+      'English province or territory name, or one of the 13 two-letter abbreviations such as ON.',
     ),
     ballot: OptionalStringSchema.describe(
       'Recorded ballot Yea, Nay, or Paired, case-insensitive; Yes and No are accepted as Yea and Nay.',
@@ -103,7 +101,7 @@ export const getVoteTool = tool('canparl_get_vote', {
       .max(COUNT_CEILING)
       .default(30)
       .describe(
-        'Maximum returned ballots, 1–400 per call, default 30; larger values up to 10000 clamp to 400 with a notice. A page ends early at the 24000-byte response budget; follow nextOffset.',
+        'Maximum returned ballots, 1–400 per call, default 30; larger values up to 10000 clamp to 400 with a notice.',
       ),
     offset: OffsetSchema,
   }),
@@ -158,6 +156,7 @@ export const getVoteTool = tool('canparl_get_vote', {
     {
       reason: 'unsupported_vote_session',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Session with a zero or out-of-range number, or absent from the official division picker.',
       recovery:
         'Call canparl_list_reference with topic sessions and choose a session supporting House divisions.',
@@ -167,6 +166,7 @@ export const getVoteTool = tool('canparl_get_vote', {
     {
       reason: 'vote_not_found',
       code: JsonRpcErrorCode.NotFound,
+      severity: 'notice',
       when: 'Division absent from session feed or explicit detail 404.',
       recovery: 'Call canparl_search_votes in the same session and use a returned number.',
       retryable: false,
@@ -174,9 +174,10 @@ export const getVoteTool = tool('canparl_get_vote', {
     {
       reason: 'invalid_ballot_filter',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Unrecognized caucus, province, or ballot value.',
       recovery:
-        'Retry canparl_get_vote with a caucus from canparl_list_reference topic parties, a province code or full name, and ballot Yea, Nay, or Paired.',
+        'Retry canparl_get_vote with a caucus from canparl_list_reference topic parties, a two-letter province abbreviation or full name, and ballot Yea, Nay, or Paired.',
       retryable: false,
     },
     {
@@ -297,58 +298,27 @@ export const getVoteTool = tool('canparl_get_vote', {
         );
       else if (input.offset > 0 && input.offset >= filtered.length)
         notices.push('Retry canparl_get_vote with offset 0 and the same filters.');
-      const available = Math.max(0, Math.min(limit.value, filtered.length - input.offset));
-      /** The page of `count` ballots; fewer than `available` is a response-budget stop. */
-      const respond = (count: number) => {
-        const page = paginate(filtered, input.offset, count);
-        const result = {
-          division,
-          tally,
-          byParty,
-          ballotsTotal: detail.data.length,
-          ballotsMatched: page.total,
-          ballots: page.items.map(({ firstName: _firstName, lastName: _lastName, ...row }) => row),
-          pagination: { ...page.pagination, limit: limit.value },
-          provenance,
-        };
-        const enriched = {
-          appliedFilters: { session, number: input.number, party, province, ballot, personId },
-          tallyMatchesBallots,
-          totalCount: page.total,
-          shown: page.items.length,
-          cap: limit.value,
-          truncated: page.pagination.hasMore,
-          notice: [
-            ...notices,
-            ...(count < available
-              ? [
-                  `The ${RESPONSE_BUDGET}-byte response budget ended this page after ${count} ${count === 1 ? 'ballot' : 'ballots'}; call canparl_get_vote with nextOffset and identical filters to continue.`,
-                ]
-              : []),
-          ].join(' '),
-        };
-        return { result, enriched };
-      };
-      const fits = (count: number) => {
-        const { result, enriched } = respond(count);
-        return responseBytes(result, enriched) <= RESPONSE_BUDGET;
-      };
-      // Page size grows with every ballot, so the largest stopped page that fits is a bisection.
-      let count = available;
-      if (count > 1 && !fits(count)) {
-        let low = 1;
-        let high = count - 1;
-        while (low < high) {
-          const middle = Math.ceil((low + high) / 2);
-          if (fits(middle)) low = middle;
-          else high = middle - 1;
-        }
-        count = low;
-      }
-      const { result, enriched } = respond(count);
-      ctx.enrich(enriched);
+      const page = paginate(filtered, input.offset, limit.value);
+      ctx.enrich({
+        appliedFilters: { session, number: input.number, party, province, ballot, personId },
+        tallyMatchesBallots,
+        totalCount: page.total,
+        shown: page.items.length,
+        cap: limit.value,
+        truncated: page.pagination.hasMore,
+        notice: notices.join(' '),
+      });
       request.throwIfOuterAborted();
-      return result;
+      return {
+        division,
+        tally,
+        byParty,
+        ballotsTotal: detail.data.length,
+        ballotsMatched: page.total,
+        ballots: page.items.map(({ firstName: _firstName, lastName: _lastName, ...row }) => row),
+        pagination: page.pagination,
+        provenance,
+      };
     } finally {
       request.dispose();
     }

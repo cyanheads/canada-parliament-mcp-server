@@ -168,6 +168,7 @@ describe('actual parliament application over stdio', () => {
     const listing = await request<{ tools: ListedTool[] }>('tools/list');
     expect(listing.tools.map((tool) => tool.name).sort()).toEqual([
       'canparl_get_bill',
+      'canparl_get_bill_text',
       'canparl_get_member',
       'canparl_get_vote',
       'canparl_list_reference',
@@ -250,7 +251,12 @@ describe('actual parliament application over stdio', () => {
       [
         'canparl_get_bill',
         ['section'],
-        '^\\s*(?:(?:sponsor|stages\\.house|stages\\.senate|stages\\.royalAssent|divisions|senateVoteDetails|publications|statute|summary\\.en|summary\\.fr|notes\\.en|notes\\.fr|milestones|webReferences)\\s*)?$',
+        '^\\s*(?:(?:sponsor|stages\\.house|stages\\.senate|stages\\.royalAssent|interChamberMessages|divisions|senateVoteDetails|publications|statute|summary\\.en|summary\\.fr|notes\\.en|notes\\.fr|milestones|webReferences|reinstatement|similarBills)\\s*)?$',
+      ],
+      [
+        'canparl_get_bill_text',
+        ['segment'],
+        '^\\s*(?:(?:introduction|headings|body|schedules)\\s*)?$',
       ],
       ['canparl_search_speeches', ['politician'], undefined],
     ] as const)
@@ -272,7 +278,7 @@ describe('actual parliament application over stdio', () => {
     const section = await call('canparl_get_bill', { billCode: 'C-901', section: 'notes.de' });
     expect(section.structuredContent).toMatchObject({ error: { code: -32602 } });
     expect(text(section)).toContain(
-      'section: Unknown section. Available sections: sponsor, stages.house, stages.senate, stages.royalAssent, divisions, senateVoteDetails, publications, statute, summary.en, summary.fr, notes.en, notes.fr, milestones, webReferences.',
+      'section: Unknown section. Available sections: sponsor, stages.house, stages.senate, stages.royalAssent, interChamberMessages, divisions, senateVoteDetails, publications, statute, summary.en, summary.fr, notes.en, notes.fr, milestones, webReferences, reinstatement, similarBills.',
     );
     // An integer sent for the patterned personId is repaired to its decimal string and reaches the handler.
     const repaired = await call('canparl_get_member', { personId: 58733, slug: 'river-example' });

@@ -266,7 +266,7 @@ export class OpenParliamentService {
       request,
     );
   }
-  /** Fetch one vote's date and subject for bounded member activity hydration. */
+  /** Fetch one vote's date, subject, and tallies for bounded member activity hydration. */
   getVote(session: string, number: number, request: RequestContext): Promise<SourceResult<Vote>> {
     const normalizedSession = sessionToken(session);
     if (!Number.isSafeInteger(number) || number <= 0)

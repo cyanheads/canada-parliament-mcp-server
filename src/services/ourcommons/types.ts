@@ -61,14 +61,24 @@ export interface VoteParticipant {
   riding: string | null;
   url: string;
 }
-/** One member's recorded ballot in a division, from that member's official votes feed. */
+/**
+ * One member's recorded ballot in a division, from that member's official votes feed, with the
+ * division's whole-House tallies and document type as {@link Division} carries them.
+ */
 export interface MemberVote {
   ballot: RecordedBallot;
   billCode: string | null;
   dateTime: string | null;
+  documentType: string | null;
+  /** Nay count; null when the feed omits it or marks it nil, never 0. */
+  nays: number | null;
   number: number;
+  /** Paired count; null when the feed omits it or marks it nil, never 0. */
+  paired: number | null;
   result: string | null;
   session: string;
   subject: string | null;
   url: string;
+  /** Yea count; null when the feed omits it or marks it nil, never 0. */
+  yeas: number | null;
 }

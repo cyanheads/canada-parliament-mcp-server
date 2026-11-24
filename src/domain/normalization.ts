@@ -78,7 +78,7 @@ export function normalizeVocabulary(
   if (!match) throw expectedOneOf([...vocabulary, ...Object.keys(aliases)]);
   return match;
 }
-/** Normalize a province code or full English name. */
+/** Normalize a two-letter province abbreviation or full English name. */
 export function normalizeProvince(value: string): string {
   return normalizeVocabulary(value, Object.values(PROVINCES), PROVINCES);
 }
@@ -113,11 +113,14 @@ export const PERSON_ID_FORMAT: InputFormat = {
   expectation:
     'Expected a decimal official person ID, as in a canparl_search_members detailLookup or a canparl_get_vote ballot row.',
 };
+/**
+ * One optional separator inside a code: a Unicode space separator (Zs), a hyphen, U+2010–U+2015, or
+ * U+2212, so a no-break space or typographic dash pasted from a document reads as a plain one.
+ */
+const SEPARATOR =
+  '[-\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\u2010-\\u2015\\u2212]?';
 const BILL_PREFIX = '(?:[Bb][Ii][Ll][Ll]\\s+)?';
 const BILL_CHAMBER = '[CcSs]';
-/** One optional separator: a Unicode space separator (Zs), a hyphen, U+2010–U+2015, or U+2212. */
-const BILL_SEPARATOR =
-  '[-\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\u2010-\\u2015\\u2212]?';
 const BILL_NUMBER = '[1-9][0-9]*';
 const BILL_SUFFIX = '[A-Za-z]?';
 /**
@@ -126,14 +129,28 @@ const BILL_SUFFIX = '[A-Za-z]?';
  * explicit, so no Unicode case folding (Kelvin sign, long s) reaches the canonical code.
  */
 export const BILL_CODE_FORMAT: InputFormat = {
-  source: `${BILL_PREFIX}${BILL_CHAMBER}${BILL_SEPARATOR}${BILL_NUMBER}${BILL_SUFFIX}`,
+  source: `${BILL_PREFIX}${BILL_CHAMBER}${SEPARATOR}${BILL_NUMBER}${BILL_SUFFIX}`,
   expectation:
     'Expected a House or Senate bill code such as C-15, C-15A, or S-1001: C or S, an optional single dash or space, a number without leading zeros, then an optional suffix letter.',
 };
 /** {@link BILL_CODE_FORMAT} capturing chamber, number, and suffix. */
 const BILL_CODE = new RegExp(
-  `^${BILL_PREFIX}(${BILL_CHAMBER})${BILL_SEPARATOR}(${BILL_NUMBER})(${BILL_SUFFIX})$`,
+  `^${BILL_PREFIX}(${BILL_CHAMBER})${SEPARATOR}(${BILL_NUMBER})(${BILL_SUFFIX})$`,
 );
+const POSTAL_FIRST_HALF = '[A-Za-z][0-9][A-Za-z]';
+const POSTAL_SECOND_HALF = '[0-9][A-Za-z][0-9]';
+/**
+ * Complete six-character Canadian postal code: letter, digit, letter, at most one separator, then
+ * digit, letter, digit, in either case. Letters Canada Post leaves unused are admitted; such a code
+ * names no riding. Case classes are explicit, as in {@link BILL_CODE_FORMAT}.
+ */
+export const POSTAL_CODE_FORMAT: InputFormat = {
+  source: `${POSTAL_FIRST_HALF}${SEPARATOR}${POSTAL_SECOND_HALF}`,
+  expectation:
+    'Expected a six-character Canadian postal code such as K1A 0A6: letter, digit, letter, an optional single space or dash, then digit, letter, digit.',
+};
+/** {@link POSTAL_CODE_FORMAT} capturing both halves. */
+const POSTAL_CODE = new RegExp(`^(${POSTAL_FIRST_HALF})${SEPARATOR}(${POSTAL_SECOND_HALF})$`);
 const SESSION = whole(SESSION_FORMAT);
 const DATE = whole(DATE_FORMAT);
 /** A whole decimal official personId; a digit-only slug input may be one. */
@@ -167,6 +184,20 @@ export function normalizeBillCode(value: string): string {
   const match = BILL_CODE.exec(value.trim());
   if (!match) throw validationError(BILL_CODE_FORMAT.expectation);
   return `${match[1]?.toUpperCase()}-${match[2]}${match[3]?.toUpperCase()}`;
+}
+/** Order canonical bill codes by chamber prefix, then number, then split-bill suffix letter: C-7, C-15, C-15A, C-71, S-2. */
+export function compareBillCodes(a: string, b: string): number {
+  return (
+    a.slice(0, 1).localeCompare(b.slice(0, 1)) ||
+    Number.parseInt(a.slice(2), 10) - Number.parseInt(b.slice(2), 10) ||
+    a.localeCompare(b)
+  );
+}
+/** Canonical code of a value in {@link POSTAL_CODE_FORMAT}: uppercase, unseparated, such as K1A0A6. */
+export function normalizePostalCode(value: string): string {
+  const match = POSTAL_CODE.exec(value.trim());
+  if (!match) throw validationError(POSTAL_CODE_FORMAT.expectation);
+  return `${match[1]}${match[2]}`.toUpperCase();
 }
 /** Accept an exact OpenParliament politician reference, never a name-derived slug. */
 export function normalizeSlug(value: string): string {

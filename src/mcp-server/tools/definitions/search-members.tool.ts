@@ -9,8 +9,10 @@ import {
   filterFailure,
   includesText,
   normalizeFilter,
+  normalizePostalCode,
   normalizeProvince,
   normalizeVocabulary,
+  POSTAL_CODE_FORMAT,
   paginate,
 } from '@/domain/normalization.js';
 import { extendVocabulary, OFFICIAL_PARTY_ALIASES, PARTIES } from '@/domain/reference-catalog.js';
@@ -20,13 +22,14 @@ import {
   LimitSchema,
   OffsetSchema,
   OptionalStringSchema,
+  optionalFormat,
   PaginationSchema,
   type SourceResult,
   SourceSchema,
 } from '@/domain/schemas.js';
 import { getOpenParliamentService } from '@/services/openparliament/index.js';
 import { getOurCommonsService, type RosterMember } from '@/services/ourcommons/index.js';
-import { fitResponsePage, formatResult, measuredTrailer } from './_format.js';
+import { formatResult, measuredTrailer } from './_format.js';
 
 /** Identifiers and known member attributes without inferred historical facts. */
 export const MemberSummarySchema = z
@@ -100,6 +103,10 @@ const enrichment = {
       riding: z.string().nullable().describe('Applied riding substring.'),
       province: z.string().nullable().describe('Canonical province name.'),
       party: z.string().nullable().describe('Canonical official caucus.'),
+      postalCode: z
+        .string()
+        .nullable()
+        .describe('Canonical postal code looked up, such as K1A0A6, or null.'),
     })
     .strict()
     .describe('Normalized AND filters and name semantics.'),
@@ -109,20 +116,20 @@ const enrichment = {
   notice: z
     .string()
     .optional()
-    .describe('Limit clamp, empty page, historical coverage, or response-budget guidance.'),
+    .describe('Limit clamp, empty page, or historical coverage guidance.'),
 };
 
 /** Search complete current roster or page the source historical name index. */
 export const searchMembersTool = tool('canparl_search_members', {
   description:
-    "Find House MPs by name, riding, province, or caucus in the complete current official roster, or set parliament to search everyone who sat in that Parliament (36th onward) with official personIds and membership dates. Set includeFormer for OpenParliament's historical name index; its rows may contain only a name and slug. Follow nextOffset with identical filters and use detailLookup with canparl_get_member.",
+    "Find House MPs by name, riding, province, caucus, or postal code in the complete current official roster, or set parliament to search everyone who sat in that Parliament (36th onward) with official personIds and membership dates. A postal code finds the MPs who represent it today. Set includeFormer for OpenParliament's historical name index; its rows may contain only a name and slug. Follow nextOffset with identical filters and use detailLookup with canparl_get_member.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     includeFormer: z
       .boolean()
       .default(false)
       .describe(
-        'Use the sparse historical name index instead of an official roster; parliament, riding, province, and party are rejected with it.',
+        'Use the sparse historical name index instead of an official roster; parliament, riding, province, party, and postalCode are rejected with it.',
       ),
     parliament: z
       .number()
@@ -130,7 +137,7 @@ export const searchMembersTool = tool('canparl_search_members', {
       .positive()
       .optional()
       .describe(
-        'Parliament number, such as 41, whose official House roster to search instead of the current one: everyone who sat in it, one row each with the caucus and riding last held there. The official roster offers the 36th onward; another number fails listing those offered. Not with includeFormer.',
+        'Parliament number, such as 41, whose official House roster to search instead of the current one: everyone who sat in it, one row each with the caucus and riding last held there. The official roster offers the 36th onward; another number fails listing those offered. Not with includeFormer or postalCode.',
       ),
     name: OptionalStringSchema.describe(
       "Official roster: literal name substring; matching ignores case, accents, dash and quote styles, and repeated whitespace. Historical: OpenParliament's own match, where one token is surname lookup and multiple tokens are full recorded name lookup, not substring search.",
@@ -139,13 +146,16 @@ export const searchMembersTool = tool('canparl_search_members', {
       'Literal riding substring; matching ignores case, accents, dash and quote styles, and repeated whitespace. Official rosters only, not includeFormer.',
     ),
     province: OptionalStringSchema.describe(
-      'Province postal code or full English name; official rosters only, not includeFormer.',
+      'Two-letter province or territory abbreviation such as ON, or the full English name; official rosters only, not includeFormer.',
     ),
     party: OptionalStringSchema.describe(
       "Official caucus name; Bloc and Green aliases accepted; official rosters only, not includeFormer. With parliament, matches the one caucus each member last held in that Parliament, and that roster's own caucus names are accepted.",
     ),
+    postalCode: optionalFormat(POSTAL_CODE_FORMAT).describe(
+      'Complete Canadian postal code such as K1A 0A6, any case, with or without one space or dash: keeps the sitting MPs whose ridings contain it, every one when it spans ridings. Current roster only, not with includeFormer or parliament.',
+    ),
     limit: LimitSchema.describe(
-      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice. Whole records may end the page early at the 24000-byte response budget; follow nextOffset.',
+      'Maximum rows, default 25, effective cap 100; values through 10000 are accepted and clamp with a notice.',
     ),
     offset: OffsetSchema,
   }),
@@ -165,17 +175,19 @@ export const searchMembersTool = tool('canparl_search_members', {
     {
       reason: 'unsupported_historical_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Historical mode includes parliament, geographic, or caucus filters.',
+      severity: 'notice',
+      when: 'Historical mode includes parliament, geographic, or caucus filters, or postalCode accompanies includeFormer or parliament.',
       recovery:
-        'Retry canparl_search_members with includeFormer false for parliament, geographic, or party filters, or omit those filters for historical name lookup.',
+        'Retry canparl_search_members without includeFormer to use parliament, riding, province, or party, and without includeFormer or parliament to use postalCode; omit those filters for historical name lookup.',
       retryable: false,
     },
     {
       reason: 'invalid_member_filter',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Unknown province, a caucus absent from the searched roster and the catalog, or a parliament the official roster does not offer.',
       recovery:
-        'Retry canparl_search_members with a value the error lists: a caucus, a province code or full name, or an offered Parliament number. canparl_list_reference topic parties lists current caucuses.',
+        'Retry canparl_search_members with a value the error lists: a caucus, a two-letter province abbreviation or full name, or an offered Parliament number. canparl_list_reference topic parties lists current caucuses.',
       retryable: false,
     },
     {
@@ -199,6 +211,12 @@ export const searchMembersTool = tool('canparl_search_members', {
   async handler(input, ctx) {
     const request = createRequestContext(ctx);
     try {
+      // Postal codes map to today's ridings, so a past Parliament or the history index never applies.
+      if (input.postalCode !== undefined && (input.includeFormer || input.parliament !== undefined))
+        throw ctx.fail(
+          'unsupported_historical_filter',
+          'postalCode searches the current roster only, so it cannot be combined with includeFormer or parliament.',
+        );
       if (
         input.includeFormer &&
         (input.riding || input.province || input.party || input.parliament !== undefined)
@@ -244,47 +262,43 @@ export const searchMembersTool = tool('canparl_search_members', {
               ? 'Retry canparl_search_members with offset 0 and the same filters.'
               : 'Try a surname alone or the full recorded name with canparl_search_members includeFormer true.',
           );
-        const { result, enriched } = fitResponsePage(
-          members.length,
-          'canparl_search_members',
-          (count, budgetNotice) => {
-            const nextOffset = count < members.length ? input.offset + count : page.nextOffset;
-            const notice = [...notices, ...(budgetNotice ? [budgetNotice] : [])].join(' ');
-            return {
-              result: {
-                total: null,
-                members: members.slice(0, count),
-                pagination: {
-                  offset: input.offset,
-                  limit: limit.value,
-                  nextOffset,
-                  hasMore: nextOffset !== null,
-                },
-                provenance: page.provenance,
-              },
-              enriched: {
-                appliedFilters: {
-                  includeFormer: true,
-                  parliament: null,
-                  name: input.name ?? null,
-                  nameMode,
-                  riding: null,
-                  province: null,
-                  party: null,
-                },
-                shown: count,
-                cap: limit.value,
-                truncated: nextOffset !== null,
-                ...(notice ? { notice } : {}),
-              },
-            };
+        ctx.enrich({
+          appliedFilters: {
+            includeFormer: true,
+            parliament: null,
+            name: input.name ?? null,
+            nameMode,
+            riding: null,
+            province: null,
+            party: null,
+            postalCode: null,
           },
-        );
-        ctx.enrich(enriched);
+          shown: members.length,
+          cap: limit.value,
+          truncated: page.nextOffset !== null,
+          ...(notices.length ? { notice: notices.join(' ') } : {}),
+        });
         request.throwIfAborted();
-        return result;
+        return {
+          total: null,
+          members,
+          pagination: {
+            offset: input.offset,
+            limit: limit.value,
+            nextOffset: page.nextOffset,
+            hasMore: page.nextOffset !== null,
+          },
+          provenance: page.provenance,
+        };
       }
       const house = getOurCommonsService();
+      const postalCode =
+        input.postalCode === undefined ? undefined : normalizePostalCode(input.postalCode);
+      // The filter's primary read: a failed lookup fails the call rather than widen to the roster.
+      const lookup =
+        postalCode === undefined
+          ? undefined
+          : await house.listPostalCodeMembers(postalCode, request);
       let roster: SourceResult<RosterMember[]>;
       let isCurrent = (_personId: string) => true;
       if (input.parliament === undefined) roster = await house.listMembers(request);
@@ -314,7 +328,12 @@ export const searchMembersTool = tool('canparl_search_members', {
       } catch (error) {
         throw ctx.fail('invalid_member_filter', ...filterFailure(error));
       }
-      const rows = roster.data
+      const postalIds = lookup && new Set(lookup.data.map((row) => row.personId));
+      // A lookup row counts only through its current roster row, so one off the roster drops out.
+      const candidates = postalIds
+        ? roster.data.filter((row) => postalIds.has(row.personId))
+        : roster.data;
+      const rows = candidates
         .filter(
           (row) =>
             (!input.name || includesText(row.name, input.name)) &&
@@ -341,44 +360,34 @@ export const searchMembersTool = tool('canparl_search_members', {
         notices.push(
           input.offset && page.total
             ? 'Retry canparl_search_members with offset 0 and the same filters.'
-            : 'No MPs matched; broaden name or riding and retry canparl_search_members.',
+            : postalIds && !candidates.length
+              ? 'No sitting MP matched this postal code: it is unassigned, or its riding is vacant. Check the code, or retry canparl_search_members with riding set to the riding name.'
+              : 'No MPs matched; broaden or remove a filter and retry canparl_search_members.',
         );
-      const { result, enriched } = fitResponsePage(
-        members.length,
-        'canparl_search_members',
-        (count, budgetNotice) => {
-          const nextOffset =
-            count < members.length ? input.offset + count : page.pagination.nextOffset;
-          const notice = [...notices, ...(budgetNotice ? [budgetNotice] : [])].join(' ');
-          return {
-            result: {
-              total: page.total,
-              members: members.slice(0, count),
-              pagination: { ...page.pagination, nextOffset, hasMore: nextOffset !== null },
-              provenance: roster.provenance,
-            },
-            enriched: {
-              totalCount: page.total,
-              appliedFilters: {
-                includeFormer: false,
-                parliament: input.parliament ?? null,
-                name: input.name ?? null,
-                nameMode: 'substring' as const,
-                riding: input.riding ?? null,
-                province: province ?? null,
-                party: party ?? null,
-              },
-              shown: count,
-              cap: limit.value,
-              truncated: nextOffset !== null,
-              ...(notice ? { notice } : {}),
-            },
-          };
+      ctx.enrich({
+        totalCount: page.total,
+        appliedFilters: {
+          includeFormer: false,
+          parliament: input.parliament ?? null,
+          name: input.name ?? null,
+          nameMode: 'substring',
+          riding: input.riding ?? null,
+          province: province ?? null,
+          party: party ?? null,
+          postalCode: postalCode ?? null,
         },
-      );
-      ctx.enrich(enriched);
+        shown: members.length,
+        cap: limit.value,
+        truncated: page.pagination.hasMore,
+        ...(notices.length ? { notice: notices.join(' ') } : {}),
+      });
       request.throwIfAborted();
-      return result;
+      return {
+        total: page.total,
+        members,
+        pagination: page.pagination,
+        provenance: [...(lookup?.provenance ?? []), ...roster.provenance],
+      };
     } finally {
       request.dispose();
     }

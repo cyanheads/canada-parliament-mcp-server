@@ -189,6 +189,22 @@ export class OurCommonsService {
   listAllMembers(request: RequestContext): Promise<SourceResult<RosterMember[]>> {
     return this.load('/Members/en/search/xml?p=*', populatedRoster, request);
   }
+  /**
+   * Obtain the sitting members whose ridings contain a postal code, from the Members search's
+   * free-text `q`, which answers a complete code with those members' current roster rows. The source
+   * prefix-matches partial codes and also searches names, ridings, and caucuses, so only a canonical
+   * six-character code (`normalizePostalCode`) is sent; anything else is a validation failure before
+   * any request. No rows is a real answer: an unassigned code, or a riding that is vacant. Every
+   * failure fails the read, a 403 as `upstream_blocked`.
+   */
+  async listPostalCodeMembers(
+    postalCode: string,
+    request: RequestContext,
+  ): Promise<SourceResult<RosterMember[]>> {
+    if (!/^[A-Z][0-9][A-Z][0-9][A-Z][0-9]$/.test(postalCode))
+      throw validationError('Postal code must be a canonical six-character code such as K1A0A6.');
+    return await this.load(`/Members/en/search/xml?q=${postalCode}`, parseRoster, request);
+  }
   /** Verify a session against the divisions picker; a rejection names the caller's `field`. */
   private async verifySession(
     session: string,

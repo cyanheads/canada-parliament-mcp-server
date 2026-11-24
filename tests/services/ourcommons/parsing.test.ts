@@ -9,7 +9,11 @@ import {
   parseVoteSessions,
   parseVotes,
 } from '@/services/ourcommons/parsing.js';
-import { realMemberVotes, realRoster } from '../../fixtures/member-tools/harness.js';
+import {
+  realMemberVotes,
+  realPostalLookup,
+  realRoster,
+} from '../../fixtures/member-tools/harness.js';
 
 const person =
   '<PersonId>9001</PersonId><PersonOfficialFirstName>River</PersonOfficialFirstName><PersonOfficialLastName>Example</PersonOfficialLastName>';
@@ -188,6 +192,29 @@ describe('House source parsing', () => {
   });
   it('reads the real empty roster of an unlisted Parliament as no rows', () =>
     expect(parseRoster(realRoster('empty'))).toEqual([]));
+  it('reads a real postal-code lookup as current roster rows', () => {
+    expect(parseRoster(realPostalLookup('k1a0a6'))).toEqual([
+      {
+        personId: '110572',
+        firstName: 'Yasir',
+        lastName: 'Naqvi',
+        name: 'Yasir Naqvi',
+        party: 'Liberal',
+        riding: 'Ottawa Centre',
+        province: 'Ontario',
+        from: '2025-04-28T00:00:00',
+        to: null,
+        url: 'https://www.ourcommons.ca/Members/en/110572',
+      },
+    ]);
+    expect(
+      parseRoster(realPostalLookup('k0a1l0')).map(({ personId, riding }) => [personId, riding]),
+    ).toEqual([
+      ['122850', 'Carleton'],
+      ['110459', 'Kanata'],
+    ]);
+    expect(parseRoster(realPostalLookup('z9z9z9'))).toEqual([]);
+  });
   it('rejects a duplicate person in a Parliament roster as malformed', () => {
     const xml = realRoster('p38');
     const first = xml.slice(
@@ -336,6 +363,10 @@ describe('member votes feed parsing', () => {
       dateTime: '2026-10-20T15:15:00',
       subject: 'Opposition Motion (Affordability crisis)',
       result: 'Negatived',
+      yeas: 153,
+      nays: 165,
+      paired: 14,
+      documentType: 'Supply',
       billCode: null,
       ballot: 'Yea',
       url: 'https://www.ourcommons.ca/Members/en/votes/45/1/179',
@@ -351,6 +382,55 @@ describe('member votes feed parsing', () => {
     ]);
     expect(new Set(rows.map((row) => row.session))).toEqual(new Set(['45-1']));
     expect(parseMemberVotes(may, '2897', '45-1')).toEqual(rows);
+  });
+  it("maps the tallies and document type of every row in a real session's whole feed", () => {
+    const rows = parseMemberVotes(realMemberVotes('110572-latest'), '110572');
+    expect(rows).toHaveLength(196);
+    expect(rows[0]).toEqual({
+      session: '45-1',
+      number: 196,
+      dateTime: '2026-11-19T17:45:00',
+      subject: 'Budgetary policy',
+      result: 'Agreed To',
+      yeas: 162,
+      nays: 151,
+      paired: 16,
+      documentType: 'Ways and means',
+      billCode: null,
+      ballot: 'Yea',
+      url: 'https://www.ourcommons.ca/Members/en/votes/45/1/196',
+    });
+    expect(rows.at(-1)).toMatchObject({
+      number: 1,
+      yeas: 337,
+      nays: 0,
+      paired: 0,
+      documentType: 'Address in Reply',
+    });
+    expect(
+      rows.filter(
+        (row) => ![row.yeas, row.nays, row.paired].every(Number.isSafeInteger) || !row.documentType,
+      ),
+    ).toEqual([]);
+    expect(rows.filter((row) => row.paired === 0)).toHaveLength(22);
+    expect(rows.filter((row) => row.billCode === 'C-15').map((row) => row.number)).toEqual([
+      82, 81, 80, 79, 78, 77, 76, 75, 53,
+    ]);
+  });
+  it('reads a nil or absent tally and an absent document type as null, never 0', () => {
+    const sparse = edit(
+      '<DecisionDivisionNumberOfYeas>153</DecisionDivisionNumberOfYeas>',
+      '<DecisionDivisionNumberOfYeas xsi:nil="true" />',
+    )
+      .replace('<DecisionDivisionNumberOfNays>165</DecisionDivisionNumberOfNays>', '')
+      .replace('<DecisionDivisionDocumentTypeName>Supply</DecisionDivisionDocumentTypeName>', '');
+    expect(parseMemberVotes(sparse, '2897')[0]).toMatchObject({
+      number: 179,
+      yeas: null,
+      nays: null,
+      paired: 14,
+      documentType: null,
+    });
   });
   it('reads the session the feed chooses when none is requested', () => {
     const rows = parseMemberVotes(realMemberVotes('35933-latest'), '35933');
@@ -401,6 +481,24 @@ describe('member votes feed parsing', () => {
       undefined,
     ],
     ['a malformed date-time', edit('2026-10-20T15:15:00', '20 Oct 2026 15:15'), '2897', undefined],
+    [
+      'an empty tally',
+      edit('>153</DecisionDivisionNumberOfYeas>', '></DecisionDivisionNumberOfYeas>'),
+      '2897',
+      undefined,
+    ],
+    [
+      'a negative tally',
+      edit('>165</DecisionDivisionNumberOfNays>', '>-1</DecisionDivisionNumberOfNays>'),
+      '2897',
+      undefined,
+    ],
+    [
+      'a fractional tally',
+      edit('>14</DecisionDivisionNumberOfPaired>', '>1.5</DecisionDivisionNumberOfPaired>'),
+      '2897',
+      undefined,
+    ],
     [
       'a missing division number',
       edit('<DecisionDivisionNumber>179</DecisionDivisionNumber>', ''),

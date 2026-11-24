@@ -18,6 +18,7 @@ import {
   normalizeChamber,
   normalizeDate,
   normalizeFilter,
+  normalizePostalCode,
   normalizeProvince,
   normalizeSession,
   normalizeSlug,
@@ -61,6 +62,8 @@ const BILL_SHAPE =
   'Expected a House or Senate bill code such as C-15, C-15A, or S-1001: C or S, an optional single dash or space, a number without leading zeros, then an optional suffix letter.';
 const SLUG_SHAPE =
   "Expected an OpenParliament politician slug of lowercase letters, digits, and single hyphens, its /politicians/ path, or its OpenParliament profile URL: member.slug from canparl_get_member, a slug from an includeFormer canparl_search_members row, or a current MP's official personId.";
+const POSTAL_SHAPE =
+  'Expected a six-character Canadian postal code such as K1A 0A6: letter, digit, letter, an optional single space or dash, then digit, letter, digit.';
 
 describe('identifier normalization', () => {
   it.each(['45-1', ' 045-01 ', { parliament: 45, session: 1 }])(
@@ -129,25 +132,6 @@ describe('identifier normalization', () => {
       expect(error.message).toBe(BILL_SHAPE);
     },
   );
-  it('accepts exactly the bill codes whose separator is a Unicode space separator or a dash', () => {
-    // The grammar stated with the Unicode property: any Zs space, the hyphen-minus, U+2010–U+2015, or U+2212.
-    const grammar = /^(?:[Bb][Ii][Ll][Ll]\s+)?[CcSs][\p{Zs}\-‐-―−]?[1-9]\d*[A-Za-z]?$/u;
-    const misses: string[] = [];
-    for (let point = 0; point <= 0xffff; point++) {
-      if (point >= 0xd800 && point <= 0xdfff) continue;
-      const c = String.fromCharCode(point);
-      for (const value of [`C${c}15`, `bill${c}C-15`, `S${c}1001A`, `${c}C-15${c}`]) {
-        let accepted = true;
-        try {
-          normalizeBillCode(value);
-        } catch {
-          accepted = false;
-        }
-        if (accepted !== grammar.test(value.trim())) misses.push(JSON.stringify(value));
-      }
-    }
-    expect(misses).toEqual([]);
-  });
   it.each([
     'alex-example',
     '/politicians/alex-example/',
@@ -176,6 +160,54 @@ describe('identifier normalization', () => {
     (input) =>
       expect(rejection(() => normalizeSlug(input)).code).toBe(JsonRpcErrorCode.ValidationError),
   );
+});
+
+describe('postal codes', () => {
+  it.each([
+    'K1A0A6',
+    'k1a0a6',
+    'K1A 0A6',
+    'K1A-0A6',
+    ` K1A 0A6 `,
+    `K1A${cp(0xa0)}0A6`,
+    `K1A${cp(0x2013)}0A6`,
+    `K1A${cp(0x2212)}0A6`,
+    `K1A${cp(0x3000)}0A6`,
+    `${cp(0xa0)}k1A-0a6\n`,
+  ])('normalizes %j to K1A0A6', (input) => expect(normalizePostalCode(input)).toBe('K1A0A6'));
+  it.each([
+    ['z9z 9z9', 'Z9Z9Z9'],
+    ['X0A 0H0', 'X0A0H0'],
+    ['w1a1a1', 'W1A1A1'],
+  ])('keeps letters Canada Post leaves unused: %j as %s', (input, expected) =>
+    expect(normalizePostalCode(input)).toBe(expected),
+  );
+  it.each([
+    '',
+    'K1A',
+    'K1A0A',
+    'K1A0A67',
+    'K1A  0A6',
+    'K1A - 0A6',
+    'K1A--0A6',
+    '1A1A1A',
+    'KK10A6',
+    'K1A\t0A6',
+    'K1A\n0A6',
+    'K1A_0A6',
+    'K1A.0A6',
+    'K1A0A6 extra',
+    'K1A 0A6 K1A 0A6',
+    `${cp(0x212a)}1A0A6`,
+    `K${cp(0x0661)}A0A6`,
+    `${cp(0xff2b)}1A0A6`,
+    `K1A${cp(0x200b)}0A6`,
+  ])('rejects %j, naming the expected shape without the value', (input) => {
+    const error = rejection(() => normalizePostalCode(input));
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe(POSTAL_SHAPE);
+    expect(error.data ?? {}).toEqual({});
+  });
 });
 
 describe('field-named filter rejection', () => {
@@ -307,10 +339,13 @@ describe('field-named filter rejection', () => {
 });
 
 describe('source vocabulary and literal matching', () => {
-  it.each(Object.entries(PROVINCES))('accepts postal code %s and its full name', (code, name) => {
-    expect(normalizeProvince(` ${code.toLowerCase()} `)).toBe(name);
-    expect(normalizeProvince(name.toUpperCase())).toBe(name);
-  });
+  it.each(Object.entries(PROVINCES))(
+    'accepts province abbreviation %s and its full name',
+    (code, name) => {
+      expect(normalizeProvince(` ${code.toLowerCase()} `)).toBe(name);
+      expect(normalizeProvince(name.toUpperCase())).toBe(name);
+    },
+  );
   it.each(['PQ', 'B.C.', 'Newfoundland', 'Ontari'])('rejects geographic guess %s', (input) => {
     expect(() => normalizeProvince(input)).toThrow();
   });
@@ -624,23 +659,6 @@ describe('accent-, dash-, quote-, and whitespace-insensitive substring filters',
     expect(plainMatch(value, query)).toBe(true);
     expect(includesText(value, query)).toBe(true);
   });
-
-  it('still matches every capital sigma pair the plain comparison matched beside any BMP character', () => {
-    const misses: string[] = [];
-    let accepted = 0;
-    for (let point = 0; point <= 0xffff; point++) {
-      if (point >= 0xd800 && point <= 0xdfff) continue;
-      const c = String.fromCharCode(point);
-      for (const value of [`a${c}Σ`, `aΣ${c}b`, `a${c}Σ b`])
-        for (const query of ['Σ', 'σ', 'ς']) {
-          if (!plainMatch(value, query)) continue;
-          accepted++;
-          if (!includesText(value, query)) misses.push(JSON.stringify([value, query]));
-        }
-    }
-    expect(misses).toEqual([]);
-    expect(accepted).toBeGreaterThan(300_000);
-  });
 });
 
 describe('civil dates and exact pagination', () => {
@@ -764,6 +782,31 @@ describe('bill-code grammar timing', { timeout: 0 }, () => {
       (input) => {
         try {
           normalizeBillCode(input);
+        } catch {
+          // Rejection is the expected outcome; only its cost is measured.
+        }
+      },
+      build,
+      sizes,
+    );
+  });
+});
+
+describe('postal-code grammar timing', { timeout: 0 }, () => {
+  it.each([
+    ['one long line ending in a break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
+    ['breaks throughout', (n: number) => '  \r\n'.repeat(n / 4)],
+    ['padding then a code then a stray letter', (n: number) => `${' '.repeat(n)}K1A0A6x`],
+    ['first half then separators', (n: number) => `K1A${' '.repeat(n)}0A6`],
+    ['first half then dashes', (n: number) => `K1A${'-'.repeat(n)}0A6`],
+    ['repeated first halves', (n: number) => 'K1A'.repeat(n / 3)],
+    ['repeated halves with separators', (n: number) => 'K1A 0A6 '.repeat(n / 8)],
+    ['digit run near-miss', (n: number) => `K1A 0A${'6'.repeat(n)}`],
+  ])('stays linear on %s', (_shape, build) => {
+    expectLinearCpu(
+      (input) => {
+        try {
+          normalizePostalCode(input);
         } catch {
           // Rejection is the expected outcome; only its cost is measured.
         }

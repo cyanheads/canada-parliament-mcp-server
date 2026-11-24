@@ -4,9 +4,8 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PROVINCES } from '@/domain/normalization.js';
 import { PARTIES } from '@/domain/reference-catalog.js';
-import type { JsonRecord } from '@/domain/schemas.js';
-import { RESPONSE_BUDGET, responseBytes } from '@/mcp-server/tools/definitions/_format.js';
 import { getVoteTool } from '@/mcp-server/tools/definitions/get-vote.tool.js';
+import { wireBytes } from '../fixtures/bill-tools/harness.js';
 import {
   assertArgumentRejection,
   assertFilterRejection,
@@ -30,8 +29,6 @@ import {
 
 const NONVOTERS =
   'Nonvoters are not listed; paired ballots are recorded participants, not inferred pairs.';
-const budgetNotice = (shown: number) =>
-  `The 24000-byte response budget ended this page after ${shown} ${shown === 1 ? 'ballot' : 'ballots'}; call canparl_get_vote with nextOffset and identical filters to continue.`;
 
 describe('canparl_get_vote production contract', () => {
   let http: ReturnType<typeof setup>;
@@ -273,7 +270,7 @@ describe('canparl_get_vote production contract', () => {
       DecisionDivisionNumberOfNays: 0,
       DecisionDivisionNumberOfPaired: 0,
     });
-  it('returns 30 ballots by default without a budget stop', async () => {
+  it('returns 30 ballots by default and the rest from nextOffset', async () => {
     votes(http, [yeas(45)]);
     ballots(
       http,
@@ -290,7 +287,7 @@ describe('canparl_get_vote production contract', () => {
     const rest = ballotParity(await call({ offset: 30 }), getVoteTool);
     expect(rest).toMatchObject({ shown: 15, truncated: false, notice: NONVOTERS });
   });
-  it('pages all 400 paired ballots under the byte budget without doubling paired participants', async () => {
+  it('returns all 400 paired ballots in one page without doubling paired participants', async () => {
     votes(http, [
       rawVote(901, {
         DecisionDivisionNumberOfYeas: 0,
@@ -302,28 +299,24 @@ describe('canparl_get_vote production contract', () => {
       http,
       Array.from({ length: 400 }, (_, i) => rawPerson(i + 1, { VoteValueName: 'Paired' })),
     );
-    const pages = await walk({ limit: 400 });
-    expect(pages.length).toBeGreaterThan(1);
-    expect(pages.flatMap(ids)).toEqual(Array.from({ length: 400 }, (_, i) => String(i + 1)).sort());
-    for (const [index, page] of pages.entries()) {
-      const shown = ids(page).length;
-      const last = index === pages.length - 1;
-      expect(page).toMatchObject({
-        ballotsTotal: 400,
-        ballotsMatched: 400,
-        tallyMatchesBallots: true,
-        byParty: [{ paired: 400, total: 400 }],
-        shown,
-        cap: 400,
-        truncated: !last,
-        pagination: { limit: 400 },
-        notice: last ? NONVOTERS : `${NONVOTERS} ${budgetNotice(shown)}`,
-      });
-      expect(shown).toBeLessThan(400);
-    }
+    const result = await call({ limit: 400 });
+    const page = ballotParity(result, getVoteTool);
+    expect(wireBytes(result)).toBeGreaterThan(24_000);
+    expect(ids(page)).toEqual(Array.from({ length: 400 }, (_, i) => String(i + 1)).sort());
+    expect(page).toMatchObject({
+      ballotsTotal: 400,
+      ballotsMatched: 400,
+      tallyMatchesBallots: true,
+      byParty: [{ paired: 400, total: 400 }],
+      shown: 400,
+      cap: 400,
+      truncated: false,
+      pagination: { offset: 0, limit: 400, nextOffset: null, hasMore: false },
+      notice: NONVOTERS,
+    });
   });
   it.each([401, 10_000])(
-    'clamps limit %i to the 400-ballot cap and keeps both disclosures across budget pages',
+    'clamps limit %i to the 400-ballot cap and keeps both disclosures across pages',
     async (limit) => {
       votes(http, [
         rawVote(901, {
@@ -340,63 +333,51 @@ describe('canparl_get_vote production contract', () => {
       );
       const clamp = `limit ${limit} exceeds the per-call maximum of 400; returned up to 400.`;
       const pages = await walk({ limit });
+      expect(pages.map((page) => ids(page).length)).toEqual([400, 50]);
       expect(pages.flatMap(ids)).toEqual(Array.from({ length: 450 }, (_, i) => String(i + 1)));
       for (const [index, page] of pages.entries()) {
-        const shown = ids(page).length;
         const last = index === pages.length - 1;
         expect(page).toMatchObject({
           ballotsTotal: 450,
           ballotsMatched: 450,
           totalCount: 450,
-          shown,
+          shown: last ? 50 : 400,
           cap: 400,
           truncated: !last,
           tallyMatchesBallots: true,
           byParty: [{ yea: 450, total: 450 }],
           pagination: { limit: 400, hasMore: !last },
-          notice: last ? `${clamp} ${NONVOTERS}` : `${clamp} ${NONVOTERS} ${budgetNotice(shown)}`,
+          notice: `${clamp} ${NONVOTERS}`,
         });
-        expect(shown).toBeGreaterThan(1);
       }
     },
   );
-  it('fills a budget-stopped page with every ballot that fits and no more', async () => {
+  it('returns a whole page past 24000 bytes and continues filtered ballots by limit alone', async () => {
     votes(http, [yeas(200)]);
     ballots(
       http,
       Array.from({ length: 200 }, (_, i) =>
         rawPerson(i + 1, {
           PersonOfficialLastName: `Surname ${'é'.repeat(i % 7)}${String(i).padStart(3, '0')}`,
+          ...(i % 2 ? { ConstituencyProvinceTerritoryName: 'Quebec' } : {}),
         }),
       ),
     );
-    const stopped = ballotParity(await call({ limit: 400, offset: 7 }), getVoteTool);
-    const fit = ids(stopped).length;
-    expect(stopped).toMatchObject({
-      shown: fit,
+    const result = await call({ limit: 400, offset: 7 });
+    const whole = ballotParity(result, getVoteTool);
+    expect(wireBytes(result)).toBeGreaterThan(24_000);
+    expect(whole).toMatchObject({
+      shown: 193,
       cap: 400,
-      truncated: true,
-      pagination: { offset: 7, limit: 400, nextOffset: 7 + fit, hasMore: true },
-      notice: `${NONVOTERS} ${budgetNotice(fit)}`,
+      truncated: false,
+      pagination: { offset: 7, limit: 400, nextOffset: null, hasMore: false },
+      notice: NONVOTERS,
     });
-    const exact = ballotParity(await call({ limit: fit, offset: 7 }), getVoteTool);
-    expect(ids(exact)).toEqual(ids(stopped));
-    expect(exact).toMatchObject({ shown: fit, cap: fit, truncated: true, notice: NONVOTERS });
-    // The same stopped page holding the next ballot as well measures over the budget.
-    const next = ballotParity(await call({ limit: 400, offset: 7 + fit }), getVoteTool);
-    const grown: Record<string, unknown> = {
-      ...stopped,
-      ballots: [...(stopped.ballots as unknown[]), (next.ballots as unknown[])[0]],
-      pagination: { offset: 7, limit: 400, nextOffset: 8 + fit, hasMore: true },
-      shown: fit + 1,
-      notice: `${NONVOTERS} ${budgetNotice(fit + 1)}`,
-    };
-    const enriched: JsonRecord = {};
-    for (const key of Object.keys(getVoteTool.enrichment!))
-      if (key in grown) enriched[key] = grown[key] as JsonRecord[string];
-    expect(responseBytes(getVoteTool.output.parse(grown), enriched)).toBeGreaterThan(
-      RESPONSE_BUDGET,
-    );
+    const quebec = ballotParity(await call({ province: 'QC', limit: 400 }), getVoteTool);
+    expect(quebec).toMatchObject({ shown: 100, ballotsMatched: 100, truncated: false });
+    const pages = await walk({ province: 'QC', limit: 30 });
+    expect(pages.map((page) => ids(page).length)).toEqual([30, 30, 30, 10]);
+    expect(pages.flatMap(ids)).toEqual(ids(quebec));
   });
   const provinces = [...Object.values(PROVINCES), ...Object.keys(PROVINCES)];
   it.each<[Record<string, unknown>, FilterRejection | null]>([

@@ -1,7 +1,8 @@
 /**
  * @fileoverview Recursive lossless CommonMark rendering for results and enrichment: nested
  * blockquotes carry structure, minimal escaping carries text, JSON literals carry scalar types.
- * Also the shared complete-response byte budget and its measure.
+ * Also the complete-response measure behind the `canparl_get_bill` and `canparl_get_bill_text`
+ * outline threshold.
  * @module mcp-server/tools/definitions/_format
  */
 import { assertRepresentableText } from '@/domain/normalization.js';
@@ -133,11 +134,16 @@ export function formatResult(result: JsonRecord): { type: 'text'; text: string }
   return [{ type: 'text', text: join(lines) }];
 }
 
-/** Complete-response byte budget shared by every tool that pages large records. */
-export const RESPONSE_BUDGET = 24_000;
 /**
- * Enrichment trailer config rendering every declared field through {@link renderValue}, the
- * rendering {@link responseBytes} measures. The framework's own field kinds render differently.
+ * Serialized bytes above which an unselected `canparl_get_bill` or `canparl_get_bill_text` returns
+ * an outline instead of the whole dossier or text. Pages are never cut by bytes; `limit` alone
+ * bounds them.
+ */
+export const OUTLINE_THRESHOLD_BYTES = 24_000;
+/**
+ * Enrichment trailer config rendering every declared field through {@link renderValue}, so the
+ * trailer decodes losslessly and {@link responseBytes} measures it exactly. The framework's own
+ * field kinds render differently.
  */
 export function measuredTrailer<K extends string>(
   enrichment: Record<K, unknown>,
@@ -169,30 +175,5 @@ export function responseBytes(body: unknown, enrichment: JsonRecord): number {
       },
     }),
     'utf8',
-  );
-}
-
-/**
- * Choose the largest whole-record prefix whose final body and enrichment fit the response budget.
- * `build` includes continuation and the supplied notice in the measured response. Empty pages
- * retain their source continuation; an indivisible oversized first record is returned whole.
- */
-export function fitResponsePage<T, E extends JsonRecord>(
-  available: number,
-  toolName: string,
-  build: (count: number, notice?: string) => { result: T; enriched: E },
-): { result: T; enriched: E } {
-  const full = build(available);
-  if (available === 0 || responseBytes(full.result, full.enriched) <= RESPONSE_BUDGET) return full;
-  for (let count = available - 1; count >= 1; count--) {
-    const page = build(
-      count,
-      `The ${RESPONSE_BUDGET}-byte response budget ended this page after ${count} ${count === 1 ? 'record' : 'records'}; call ${toolName} with nextOffset and identical filters to continue.`,
-    );
-    if (responseBytes(page.result, page.enriched) <= RESPONSE_BUDGET) return page;
-  }
-  return build(
-    1,
-    `One complete record exceeds the ${RESPONSE_BUDGET}-byte response budget and is returned whole; follow nextOffset with identical filters when present.`,
   );
 }
